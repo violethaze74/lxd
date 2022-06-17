@@ -233,7 +233,7 @@ func (d *zone) Update(config *api.NetworkZonePut, clientType request.ClientType)
 		d.init(d.state, d.id, d.projectName, d.info)
 
 		revert.Add(func() {
-			d.state.DB.Cluster.UpdateNetworkZone(d.id, &oldConfig)
+			_ = d.state.DB.Cluster.UpdateNetworkZone(d.id, &oldConfig)
 			d.info.NetworkZonePut = oldConfig
 			d.init(d.state, d.id, d.projectName, d.info)
 		})
@@ -454,6 +454,40 @@ func (d *zone) Content() (*strings.Builder, error) {
 		"zone":        d.info.Name,
 		"serial":      time.Now().Unix(),
 		"records":     records,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return sb, nil
+}
+
+// SOA returns just the DNS zone SOA record.
+func (d *zone) SOA() (*strings.Builder, error) {
+	// Get the nameservers.
+	nameservers := []string{}
+	for _, entry := range strings.Split(d.info.Config["dns.nameservers"], ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+
+		nameservers = append(nameservers, entry)
+	}
+
+	primary := "hostmaster." + d.info.Name
+	if len(nameservers) > 0 {
+		primary = nameservers[0]
+	}
+
+	// Template the zone file.
+	sb := &strings.Builder{}
+	err := zoneTemplate.Execute(sb, map[string]any{
+		"primary":     primary,
+		"nameservers": nameservers,
+		"zone":        d.info.Name,
+		"serial":      time.Now().Unix(),
+		"records":     map[string]string{},
 	})
 	if err != nil {
 		return nil, err

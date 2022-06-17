@@ -626,7 +626,7 @@ func canUseShiftfs() bool {
 		logger.Debugf("%s - Failed to open host mount namespace", err)
 		return false
 	}
-	defer hostMntNs.Close()
+	defer func() { _ = hostMntNs.Close() }()
 
 	err = unix.Unshare(unix.CLONE_NEWNS)
 	if err != nil {
@@ -647,11 +647,7 @@ func canUseShiftfs() bool {
 	}
 
 	err = unix.Mount(shared.VarPath(), shared.VarPath(), "shiftfs", 0, "mark")
-	if err != nil {
-		return false
-	}
-
-	return true
+	return err == nil
 }
 
 // We're only using this during daemon startup to give an indication whether

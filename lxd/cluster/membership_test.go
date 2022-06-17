@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/lxc/lxd/lxd/cluster"
+	clusterConfig "github.com/lxc/lxd/lxd/cluster/config"
 	"github.com/lxc/lxd/lxd/db"
 	clusterDB "github.com/lxc/lxd/lxd/db/cluster"
 	"github.com/lxc/lxd/lxd/project"
@@ -34,7 +35,7 @@ func TestBootstrap_UnmetPreconditions(t *testing.T) {
 				f.ClusterAddress("1.2.3.4:666")
 				f.RaftNode("5.6.7.8:666")
 				filename := filepath.Join(f.state.OS.VarDir, "cluster.crt")
-				ioutil.WriteFile(filename, []byte{}, 0644)
+				_ = ioutil.WriteFile(filename, []byte{}, 0644)
 			},
 			"Inconsistent state: found leftover cluster certificate",
 		},
@@ -74,7 +75,7 @@ func TestBootstrap_UnmetPreconditions(t *testing.T) {
 			serverCert := shared.TestingKeyPair()
 			state.ServerCert = func() *shared.CertInfo { return serverCert }
 			gateway := newGateway(t, state.DB.Node, serverCert, serverCert)
-			defer gateway.Shutdown()
+			defer func() { _ = gateway.Shutdown() }()
 
 			err := cluster.Bootstrap(state, gateway, "buzz")
 			assert.EqualError(t, err, c.error)
@@ -89,7 +90,7 @@ func TestBootstrap(t *testing.T) {
 	serverCert := shared.TestingKeyPair()
 	gateway := newGateway(t, state.DB.Node, serverCert, serverCert)
 	state.ServerCert = func() *shared.CertInfo { return serverCert }
-	defer gateway.Shutdown()
+	defer func() { _ = gateway.Shutdown() }()
 
 	mux := http.NewServeMux()
 	server := newServer(serverCert, mux)
@@ -211,7 +212,7 @@ func TestAccept_UnmetPreconditions(t *testing.T) {
 
 			serverCert := shared.TestingKeyPair()
 			gateway := newGateway(t, state.DB.Node, serverCert, serverCert)
-			defer gateway.Shutdown()
+			defer func() { _ = gateway.Shutdown() }()
 
 			c.setup(&membershipFixtures{t: t, state: state})
 
@@ -228,11 +229,29 @@ func TestAccept(t *testing.T) {
 
 	serverCert := shared.TestingKeyPair()
 	gateway := newGateway(t, state.DB.Node, serverCert, serverCert)
-	defer gateway.Shutdown()
+	defer func() { _ = gateway.Shutdown() }()
 
 	f := &membershipFixtures{t: t, state: state}
 	f.RaftNode("1.2.3.4:666")
 	f.ClusterNode("1.2.3.4:666")
+
+	err := state.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		var err error
+
+		state.GlobalConfig, err = clusterConfig.Load(tx)
+		if err != nil {
+			return err
+		}
+
+		// Get the local node (will be used if clustered).
+		state.ServerName, err = tx.GetLocalNodeName()
+		if err != nil {
+			return err
+		}
+
+		return nil
+	})
+	require.NoError(t, err)
 
 	nodes, err := cluster.Accept(
 		state, gateway, "buzz", "5.6.7.8:666", cluster.SchemaVersion, len(version.APIExtensions), osarch.ARCH_64BIT_INTEL_X86)
@@ -255,7 +274,7 @@ func TestJoin(t *testing.T) {
 	defer cleanup()
 
 	targetGateway := newGateway(t, targetState.DB.Node, targetCert, targetCert)
-	defer targetGateway.Shutdown()
+	defer func() { _ = targetGateway.Shutdown() }()
 
 	altServerCert := shared.TestingAltKeyPair()
 	trustedAltServerCert, _ := x509.ParseCertificate(altServerCert.KeyPair().Certificate[0])
@@ -283,6 +302,23 @@ func TestJoin(t *testing.T) {
 	targetState.DB.Cluster, err = db.OpenCluster(context.Background(), "db.bin", targetStore, targetAddress, "/unused/db/dir", 10*time.Second, nil, driver.WithDialFunc(targetDialFunc))
 	targetState.ServerCert = func() *shared.CertInfo { return targetCert }
 	require.NoError(t, err)
+
+	err = targetState.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		targetState.GlobalConfig, err = clusterConfig.Load(tx)
+		if err != nil {
+			return err
+		}
+
+		// Get the local node (will be used if clustered).
+		targetState.ServerName, err = tx.GetLocalNodeName()
+		if err != nil {
+			return err
+		}
+
+		return nil
+	})
+	require.NoError(t, err)
+
 	// PreparedStmts is a global variable and will be overwritten by the OpenCluster call below, so save it here.
 	targetStmts := clusterDB.PreparedStmts
 
@@ -304,7 +340,7 @@ func TestJoin(t *testing.T) {
 
 	gateway := newGateway(t, state.DB.Node, targetCert, altServerCert)
 
-	defer gateway.Shutdown()
+	defer func() { _ = gateway.Shutdown() }()
 
 	for path, handler := range gateway.HandlerFuncs(nil, trustedCerts) {
 		mux.HandleFunc(path, handler)
@@ -319,6 +355,23 @@ func TestJoin(t *testing.T) {
 
 	state.DB.Cluster, err = db.OpenCluster(context.Background(), "db.bin", store, address, "/unused/db/dir", 5*time.Second, nil, driver.WithDialFunc(dialFunc))
 	require.NoError(t, err)
+
+	err = state.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		state.GlobalConfig, err = clusterConfig.Load(tx)
+		if err != nil {
+			return err
+		}
+
+		// Get the local node (will be used if clustered).
+		state.ServerName, err = tx.GetLocalNodeName()
+		if err != nil {
+			return err
+		}
+
+		return nil
+	})
+	require.NoError(t, err)
+
 	// Save the other instance of PreparedStmts here.
 	sourceStmts := clusterDB.PreparedStmts
 

@@ -203,11 +203,11 @@ func (c *Controller) CreateContainer(inst Instance, interfaces []ContainerInterf
 	// Wipe the container entry if anything fails
 	success := false
 	defer func() {
-		if success == true {
+		if success {
 			return
 		}
 
-		c.DeleteContainer(inst)
+		_ = c.DeleteContainer(inst)
 	}()
 
 	// Create the rest of the interfaces

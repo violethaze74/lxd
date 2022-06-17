@@ -140,12 +140,20 @@ migration() {
   lxc_remote list l2: | grep RUNNING | grep nonlive
   lxc_remote delete l2:nonlive --force
 
+  # Get container's pool.
+  pool=$(lxc config profile device get default root pool)
+  remote_pool=$(lxc_remote config profile device get l2:default root pool)
+
   # Test container only copies
   lxc init testimage cccp
+
+  lxc storage volume set "${pool}" container/cccp user.foo=snap0
   echo "before" | lxc file push - cccp/blah
   lxc snapshot cccp
+  lxc storage volume set "${pool}" container/cccp user.foo=snap1
   lxc snapshot cccp
   echo "after" | lxc file push - cccp/blah
+  lxc storage volume set "${pool}" container/cccp user.foo=postsnap1
 
   # Local container only copy.
   lxc copy cccp udssr --instance-only
@@ -157,6 +165,10 @@ migration() {
   lxc copy cccp udssr
   [ "$(lxc info udssr | grep -c snap)" -eq 2 ]
   [ "$(lxc file pull udssr/blah -)" = "after" ]
+  lxc storage volume show "${pool}" container/udssr
+  lxc storage volume get "${pool}" container/udssr user.foo | grep -Fx "postsnap1"
+  lxc storage volume get "${pool}" container/udssr/snap0 user.foo | grep -Fx "snap0"
+  lxc storage volume get "${pool}" container/udssr/snap1 user.foo | grep -Fx "snap1"
   lxc delete udssr
 
   # Remote container only copy.
@@ -169,6 +181,10 @@ migration() {
   lxc_remote copy l1:cccp l2:udssr
   [ "$(lxc_remote info l2:udssr | grep -c snap)" -eq 2 ]
   [ "$(lxc_remote file pull l2:udssr/blah -)" = "after" ]
+  lxc_remote storage volume show l2:"${remote_pool}" container/udssr
+  lxc_remote storage volume get l2:"${remote_pool}" container/udssr user.foo | grep -Fx "postsnap1"
+  lxc_remote storage volume get l2:"${remote_pool}" container/udssr/snap0 user.foo | grep -Fx "snap0"
+  lxc_remote storage volume get l2:"${remote_pool}" container/udssr/snap1 user.foo | grep -Fx "snap1"
   lxc_remote delete l2:udssr
 
   # Remote container only move.
@@ -284,22 +300,70 @@ migration() {
   remote_pool2="lxdtest-$(basename "${lxd2_dir}")"
 
   lxc_remote storage volume create l1:"$remote_pool1" vol1
-  lxc_remote storage volume create l1:"$remote_pool1" vol2
-  lxc_remote storage volume snapshot l1:"$remote_pool1" vol2
+  lxc_remote storage volume set l1:"$remote_pool1" vol1 user.foo=snap0vol1
+  lxc_remote storage volume snapshot l1:"$remote_pool1" vol1
+  lxc_remote storage volume set l1:"$remote_pool1" vol1 user.foo=snap1vol1
+  lxc_remote storage volume snapshot l1:"$remote_pool1" vol1
+  lxc_remote storage volume set l1:"$remote_pool1" vol1 user.foo=postsnap1vol1
 
-  # remote storage volume migration in "pull" mode
+  # remote storage volume and snapshots migration in "pull" mode
   lxc_remote storage volume copy l1:"$remote_pool1/vol1" l2:"$remote_pool2/vol2"
-  lxc_remote storage volume move l1:"$remote_pool1/vol1" l2:"$remote_pool2/vol3"
-  ! lxc_remote storage volume list l1:"$remote_pool1/vol1" || false
-  lxc_remote storage volume copy l1:"$remote_pool1/vol2" l2:"$remote_pool2/vol4" --volume-only
-  lxc_remote storage volume copy l1:"$remote_pool1/vol2" l2:"$remote_pool2/vol5"
-  lxc_remote storage volume move l1:"$remote_pool1/vol2" l2:"$remote_pool2/vol6"
+  lxc_remote storage volume get l2:"$remote_pool2" vol2 user.foo | grep -Fx "postsnap1vol1"
+  lxc_remote storage volume get l2:"$remote_pool2" vol2/snap0 user.foo | grep -Fx "snap0vol1"
+  lxc_remote storage volume get l2:"$remote_pool2" vol2/snap1 user.foo | grep -Fx "snap1vol1"
+  lxc_remote storage volume delete l2:"$remote_pool2" vol2
+
+  # check moving volume and snapshots.
+  lxc_remote storage volume copy l1:"$remote_pool1/vol1" l1:"$remote_pool1/vol2"
+  lxc_remote storage volume move l1:"$remote_pool1/vol2" l2:"$remote_pool2/vol3"
+  ! lxc_remote storage volume show l1:"$remote_pool1" vol2 || false
+  lxc_remote storage volume get l2:"$remote_pool2" vol3 user.foo | grep -Fx "postsnap1vol1"
+  lxc_remote storage volume get l2:"$remote_pool2" vol3/snap0 user.foo | grep -Fx "snap0vol1"
+  lxc_remote storage volume get l2:"$remote_pool2" vol3/snap1 user.foo | grep -Fx "snap1vol1"
+  lxc_remote storage volume delete l2:"$remote_pool2" vol3
+
+  lxc_remote storage volume copy l1:"$remote_pool1/vol1" l2:"$remote_pool2/vol2" --volume-only
+  lxc_remote storage volume get l2:"$remote_pool2" vol2 user.foo | grep -Fx "postsnap1vol1"
+  ! lxc_remote storage volume show l2:"$remote_pool2" vol2/snap0 || false
+  ! lxc_remote storage volume show l2:"$remote_pool2" vol2/snap1 || false
+  lxc_remote storage volume delete l2:"$remote_pool2" vol2
+
+  # remote storage volume and snapshots migration refresh in "pull" mode
+  lxc_remote storage volume set l1:"$remote_pool1" vol1 user.foo=snapremovevol1
+  lxc_remote storage volume snapshot l1:"$remote_pool1" vol1 snapremove
+  lxc_remote storage volume set l1:"$remote_pool1" vol1 user.foo=postsnap1vol1
+  lxc_remote storage volume copy l1:"$remote_pool1/vol1" l2:"$remote_pool2/vol2" --refresh
+  lxc_remote storage volume delete l1:"$remote_pool1" vol1
+
+  lxc_remote storage volume get l2:"$remote_pool2" vol2 user.foo | grep -Fx "postsnap1vol1"
+  lxc_remote storage volume get l2:"$remote_pool2" vol2/snap0 user.foo | grep -Fx "snap0vol1"
+  lxc_remote storage volume get l2:"$remote_pool2" vol2/snap1 user.foo | grep -Fx "snap1vol1"
+  lxc_remote storage volume get l2:"$remote_pool2" vol2/snapremove user.foo | grep -Fx "snapremovevol1"
+
+  # check remote storage volume refresh from a different volume
+  lxc_remote storage volume create l1:"$remote_pool1" vol3
+  lxc_remote storage volume set l1:"$remote_pool1" vol3 user.foo=snap0vol3
+  lxc_remote storage volume snapshot l1:"$remote_pool1" vol3
+  lxc_remote storage volume set l1:"$remote_pool1" vol3 user.foo=snap1vol3
+  lxc_remote storage volume snapshot l1:"$remote_pool1" vol3
+  lxc_remote storage volume set l1:"$remote_pool1" vol3 user.foo=snap2vol3
+  lxc_remote storage volume snapshot l1:"$remote_pool1" vol3
+  lxc_remote storage volume set l1:"$remote_pool1" vol3 user.foo=postsnap1vol3
+
+  # check snapshot volumes and snapshots are refreshed
+  # FIXME: Due to a known issue (https://github.com/lxc/lxd/issues/10436) we are currently only diffing the
+  # snapshots by name, so infact existing snapshots of the same name won't be overwritten even if their config or
+  # contents is different.
+  lxc_remote storage volume copy l1:"$remote_pool1/vol3" l2:"$remote_pool2/vol2" --refresh
+  lxc_remote storage volume ls l2:"$remote_pool2"
+  lxc_remote storage volume delete l1:"$remote_pool1" vol3
+  lxc_remote storage volume get l2:"$remote_pool2" vol2 user.foo | grep -Fx "postsnap1vol1"   # Should be postsnap1vol3
+  lxc_remote storage volume get l2:"$remote_pool2" vol2/snap0 user.foo | grep -Fx "snap0vol1" # Should be snap0vol3
+  lxc_remote storage volume get l2:"$remote_pool2" vol2/snap1 user.foo | grep -Fx "snap1vol1" # Should be snap1vol3
+  lxc_remote storage volume get l2:"$remote_pool2" vol2/snap2 user.foo | grep -Fx "snap2vol3"
+  ! lxc_remote storage volume show l2:"$remote_pool2" vol2/snapremove || false
 
   lxc_remote storage volume delete l2:"$remote_pool2" vol2
-  lxc_remote storage volume delete l2:"$remote_pool2" vol3
-  lxc_remote storage volume delete l2:"$remote_pool2" vol4
-  lxc_remote storage volume delete l2:"$remote_pool2" vol5
-  lxc_remote storage volume delete l2:"$remote_pool2" vol6
 
   # remote storage volume migration in "push" mode
   lxc_remote storage volume create l1:"$remote_pool1" vol1
@@ -457,6 +521,15 @@ migration() {
   lxc_remote copy l1:c1 l2:c1 --refresh
   lxc_remote snapshot l1:c1
   lxc_remote copy l1:c1 l2:c1 --refresh
+
+  lxc_remote rm -f l1:c1
+  lxc_remote rm -f l2:c1
+
+  # On zfs, this used to crash due to a websocket read issue.
+  lxc launch testimage c1
+  lxc snapshot c1
+  lxc copy c1 l2:c1 --stateless
+  lxc copy c1 l2:c1 --stateless --refresh
 
   lxc_remote rm -f l1:c1
   lxc_remote rm -f l2:c1

@@ -80,7 +80,7 @@ func (d *mock) CreateVolumeFromBackup(vol Volume, srcBackup backup.Info, srcData
 }
 
 // CreateVolumeFromCopy provides same-pool volume copying functionality.
-func (d *mock) CreateVolumeFromCopy(vol Volume, srcVol Volume, copySnapshots bool, op *operations.Operation) error {
+func (d *mock) CreateVolumeFromCopy(vol Volume, srcVol Volume, copySnapshots bool, allowInconsistent bool, op *operations.Operation) error {
 	return nil
 }
 
@@ -90,7 +90,7 @@ func (d *mock) CreateVolumeFromMigration(vol Volume, conn io.ReadWriteCloser, vo
 }
 
 // RefreshVolume provides same-pool volume and specific snapshots syncing functionality.
-func (d *mock) RefreshVolume(vol Volume, srcVol Volume, srcSnapshots []Volume, op *operations.Operation) error {
+func (d *mock) RefreshVolume(vol Volume, srcVol Volume, srcSnapshots []Volume, allowInconsistent bool, op *operations.Operation) error {
 	return nil
 }
 

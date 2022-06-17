@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/lxc/lxd/lxd/db/cluster"
 	"github.com/lxc/lxd/lxd/db/query"
 	"github.com/lxc/lxd/shared"
 	"github.com/lxc/lxd/shared/api"
@@ -140,14 +141,19 @@ SELECT storage_volumes.name, storage_volumes.type, projects.name, storage_volume
 	}
 
 	// Get all the profiles using the storage pool.
-	profiles, err := c.GetProfiles(ProfileFilter{})
+	profiles, err := cluster.GetProfiles(context.TODO(), c.tx, cluster.ProfileFilter{})
 	if err != nil {
 		return nil, err
 	}
 
 	for _, profile := range profiles {
-		for _, device := range profile.Devices {
-			if device.Type != TypeDisk {
+		profileDevices, err := cluster.GetProfileDevices(context.TODO(), c.tx, profile.ID)
+		if err != nil {
+			return nil, err
+		}
+
+		for _, device := range profileDevices {
+			if device.Type != cluster.TypeDisk {
 				continue
 			}
 
@@ -220,7 +226,7 @@ func (c *ClusterTx) GetNonPendingStoragePoolsNamesToIDs() (map[string]int64, err
 	if err != nil {
 		return nil, err
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 	err = query.SelectObjects(stmt, dest, storagePoolPending)
 	if err != nil {
 		return nil, err
@@ -395,7 +401,7 @@ func (c *ClusterTx) CreatePendingStoragePool(node, name, driver string, conf map
 	if err != nil {
 		return err
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 	err = query.SelectObjects(stmt, dest, name)
 	if err != nil {
 		return err
@@ -498,7 +504,7 @@ func (c *ClusterTx) storagePoolNodes(poolID int64) (map[int64]StoragePoolNode, e
 	if err != nil {
 		return nil, err
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	err = query.SelectObjects(stmt, dest, poolID)
 	if err != nil {
@@ -603,9 +609,7 @@ func (c *Cluster) storagePools(where string, args ...any) ([]string, error) {
 
 	if where != "" {
 		stmt += fmt.Sprintf(" WHERE %s", where)
-		for _, arg := range args {
-			inargs = append(inargs, arg)
-		}
+		inargs = append(inargs, args...)
 	}
 
 	result, err := queryScan(c, stmt, inargs, outargs)
@@ -841,7 +845,7 @@ func storagePoolConfigAdd(tx *sql.Tx, poolID, nodeID int64, poolConfig map[strin
 	if err != nil {
 		return err
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	for k, v := range poolConfig {
 		if v == "" {

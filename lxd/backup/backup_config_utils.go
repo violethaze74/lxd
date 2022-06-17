@@ -1,6 +1,7 @@
 package backup
 
 import (
+	"context"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -8,27 +9,21 @@ import (
 
 	"gopkg.in/yaml.v2"
 
+	"github.com/lxc/lxd/lxd/backup/config"
 	"github.com/lxc/lxd/lxd/db"
+	"github.com/lxc/lxd/lxd/db/cluster"
 	deviceConfig "github.com/lxc/lxd/lxd/device/config"
 	"github.com/lxc/lxd/lxd/instance/instancetype"
+	"github.com/lxc/lxd/lxd/state"
 	"github.com/lxc/lxd/shared"
 	"github.com/lxc/lxd/shared/api"
 	"github.com/lxc/lxd/shared/osarch"
 )
 
-// Config represents the config of a backup that can be stored in a backup.yaml file (or embedded in index.yaml).
-type Config struct {
-	Container       *api.Instance                `yaml:"container,omitempty"` // Used by VM backups too.
-	Snapshots       []*api.InstanceSnapshot      `yaml:"snapshots,omitempty"`
-	Pool            *api.StoragePool             `yaml:"pool,omitempty"`
-	Volume          *api.StorageVolume           `yaml:"volume,omitempty"`
-	VolumeSnapshots []*api.StorageVolumeSnapshot `yaml:"volume_snapshots,omitempty"`
-}
-
-// ToInstanceDBArgs converts the instance config in the backup config to DB InstanceArgs.
-func (c *Config) ToInstanceDBArgs(projectName string) *db.InstanceArgs {
+// ConfigToInstanceDBArgs converts the instance config in the backup config to DB InstanceArgs.
+func ConfigToInstanceDBArgs(state *state.State, c *config.Config, projectName string, applyProfiles bool) (*db.InstanceArgs, error) {
 	if c.Container == nil {
-		return nil
+		return nil, nil
 	}
 
 	arch, _ := osarch.ArchitectureId(c.Container.Architecture)
@@ -46,21 +41,44 @@ func (c *Config) ToInstanceDBArgs(projectName string) *db.InstanceArgs {
 		Ephemeral:    c.Container.Ephemeral,
 		LastUsedDate: c.Container.LastUsedAt,
 		Name:         c.Container.Name,
-		Profiles:     c.Container.Profiles,
 		Stateful:     c.Container.Stateful,
 	}
 
-	return inst
+	if applyProfiles {
+		err := state.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+			inst.Profiles = make([]api.Profile, 0, len(c.Container.Profiles))
+			profiles, err := cluster.GetProfilesIfEnabled(ctx, tx.Tx(), projectName, c.Container.Profiles)
+			if err != nil {
+				return err
+			}
+
+			for _, profile := range profiles {
+				apiProfile, err := profile.ToAPI(ctx, tx.Tx())
+				if err != nil {
+					return err
+				}
+
+				inst.Profiles = append(inst.Profiles, *apiProfile)
+			}
+
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return inst, nil
 }
 
 // ParseConfigYamlFile decodes the YAML file at path specified into a Config.
-func ParseConfigYamlFile(path string) (*Config, error) {
+func ParseConfigYamlFile(path string) (*config.Config, error) {
 	data, err := ioutil.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
 
-	backupConf := Config{}
+	backupConf := config.Config{}
 	if err := yaml.Unmarshal(data, &backupConf); err != nil {
 		return nil, err
 	}
@@ -128,7 +146,7 @@ func UpdateInstanceConfigStoragePool(c *db.Cluster, b Info, mountPath string) er
 		if err != nil {
 			return err
 		}
-		defer file.Close()
+		defer func() { _ = file.Close() }()
 
 		data, err := yaml.Marshal(&backup)
 		if err != nil {
@@ -140,7 +158,7 @@ func UpdateInstanceConfigStoragePool(c *db.Cluster, b Info, mountPath string) er
 			return err
 		}
 
-		return nil
+		return file.Close()
 	}
 
 	err = f(filepath.Join(mountPath, "backup.yaml"))

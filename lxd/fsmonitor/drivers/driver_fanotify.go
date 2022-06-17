@@ -48,25 +48,20 @@ func (d *fanotify) load(ctx context.Context) error {
 
 	err = unix.FanotifyMark(d.fd, unix.FAN_MARK_ADD|unix.FAN_MARK_FILESYSTEM, unix.FAN_CREATE|unix.FAN_DELETE|unix.FAN_ONDIR, unix.AT_FDCWD, d.prefixPath)
 	if err != nil {
-		unix.Close(d.fd)
+		_ = unix.Close(d.fd)
 		return fmt.Errorf("Failed to watch directory %q: %w", d.prefixPath, err)
 	}
 
 	fd, err := unix.Open(d.prefixPath, unix.O_DIRECTORY|unix.O_RDONLY|unix.O_CLOEXEC, 0)
 	if err != nil {
-		unix.Close(d.fd)
+		_ = unix.Close(d.fd)
 		return fmt.Errorf("Failed to open directory %q: %w", d.prefixPath, err)
 	}
 
 	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				unix.Close(d.fd)
-				fanotifyLoaded = false
-				return
-			}
-		}
+		<-ctx.Done()
+		_ = unix.Close(d.fd)
+		fanotifyLoaded = false
 	}()
 
 	go d.getEvents(fd)
@@ -88,7 +83,7 @@ func (d *fanotify) getEvents(mountFd int) {
 		if err != nil {
 			// Stop listening for events as the fanotify fd has been closed due to cleanup.
 			if errors.Is(err, unix.EBADF) {
-				unix.Close(mountFd)
+				_ = unix.Close(mountFd)
 				return
 			}
 
@@ -158,7 +153,7 @@ func (d *fanotify) getEvents(mountFd int) {
 			d.logger.Error("Failed to read symlink", logger.Ctx{"err": err})
 			continue
 		}
-		unix.Close(fd)
+		_ = unix.Close(fd)
 
 		// If the target file has been deleted, the returned value might contain a " (deleted)" suffix.
 		// This needs to be removed.

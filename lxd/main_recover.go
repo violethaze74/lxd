@@ -121,7 +121,7 @@ func (c *cmdRecover) Run(cmd *cobra.Command, args []string) error {
 
 			for {
 				var configKey, configValue string
-				cli.AskString("Additional storage pool configuration property (KEY=VALUE, empty when done): ", "", validate.Optional(func(value string) error {
+				_, _ = cli.AskString("Additional storage pool configuration property (KEY=VALUE, empty when done): ", "", validate.Optional(func(value string) error {
 					configParts := strings.SplitN(value, "=", 2)
 					if len(configParts) < 2 {
 						return fmt.Errorf("Config option should be in the format KEY=VALUE")
@@ -206,7 +206,7 @@ func (c *cmdRecover) Run(cmd *cobra.Command, args []string) error {
 				fmt.Printf(" - %s\n", depErr)
 			}
 
-			cli.AskString("Please create those missing entries and then hit ENTER: ", "", validate.Optional())
+			_, _ = cli.AskString("Please create those missing entries and then hit ENTER: ", "", validate.Optional())
 		} else {
 			if len(res.UnknownVolumes) <= 0 {
 				fmt.Print("No unknown volumes found. Nothing to do.\n")
@@ -229,7 +229,9 @@ func (c *cmdRecover) Run(cmd *cobra.Command, args []string) error {
 	fmt.Print("Starting recovery...\n")
 
 	// Send /internal/recover/import request to LXD.
-	reqImport := internalRecoverImportPost{
+	// Don't lint next line with gosimple. It says we should convert reqValidate directly to an internalRecoverImportPost
+	// because their types are identical. This is less clear and will not work if either type changes in the future.
+	reqImport := internalRecoverImportPost{ //nolint:gosimple
 		Pools: reqValidate.Pools,
 	}
 

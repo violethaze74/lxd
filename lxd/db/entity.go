@@ -29,10 +29,10 @@ func (c *Cluster) GetURIFromEntity(entityType int, entityID int) (string, error)
 
 	switch entityType {
 	case cluster.TypeImage:
-		var images []Image
+		var images []cluster.Image
 
 		err = c.Transaction(context.TODO(), func(ctx context.Context, tx *ClusterTx) error {
-			images, err = tx.GetImages(ImageFilter{})
+			images, err = cluster.GetImages(ctx, tx.tx, cluster.ImageFilter{})
 			if err != nil {
 				return err
 			}
@@ -56,10 +56,10 @@ func (c *Cluster) GetURIFromEntity(entityType int, entityID int) (string, error)
 			return "", ErrUnknownEntityID
 		}
 	case cluster.TypeProfile:
-		var profiles []Profile
+		var profiles []cluster.Profile
 
 		err = c.Transaction(context.TODO(), func(ctx context.Context, tx *ClusterTx) error {
-			profiles, err = tx.GetProfiles(ProfileFilter{})
+			profiles, err = cluster.GetProfiles(ctx, tx.Tx(), cluster.ProfileFilter{})
 			if err != nil {
 				return err
 			}
@@ -133,10 +133,10 @@ func (c *Cluster) GetURIFromEntity(entityType int, entityID int) (string, error)
 	case cluster.TypeContainer:
 		fallthrough
 	case cluster.TypeInstance:
-		var instances []Instance
+		var instances []cluster.Instance
 
 		err = c.Transaction(context.TODO(), func(ctx context.Context, tx *ClusterTx) error {
-			instances, err = tx.GetInstances(InstanceFilter{})
+			instances, err = cluster.GetInstances(ctx, tx.tx, cluster.InstanceFilter{})
 			if err != nil {
 				return err
 			}
@@ -165,10 +165,10 @@ func (c *Cluster) GetURIFromEntity(entityType int, entityID int) (string, error)
 			return "", fmt.Errorf("Failed to get instance backup: %w", err)
 		}
 
-		var instances []Instance
+		var instances []cluster.Instance
 
 		err = c.Transaction(context.TODO(), func(ctx context.Context, tx *ClusterTx) error {
-			instances, err = tx.GetInstances(InstanceFilter{})
+			instances, err = cluster.GetInstances(ctx, tx.tx, cluster.InstanceFilter{})
 			if err != nil {
 				return err
 			}
@@ -192,10 +192,10 @@ func (c *Cluster) GetURIFromEntity(entityType int, entityID int) (string, error)
 			return "", ErrUnknownEntityID
 		}
 	case cluster.TypeInstanceSnapshot:
-		var snapshots []InstanceSnapshot
+		var snapshots []cluster.InstanceSnapshot
 
 		err = c.Transaction(context.TODO(), func(ctx context.Context, tx *ClusterTx) error {
-			snapshots, err = tx.GetInstanceSnapshots(InstanceSnapshotFilter{})
+			snapshots, err = cluster.GetInstanceSnapshots(ctx, tx.Tx(), cluster.InstanceSnapshotFilter{})
 			if err != nil {
 				return err
 			}
@@ -249,12 +249,12 @@ func (c *Cluster) GetURIFromEntity(entityType int, entityID int) (string, error)
 
 		uri = fmt.Sprintf(cluster.EntityURIs[entityType], nodeInfo.Name)
 	case cluster.TypeOperation:
-		var op Operation
+		var op cluster.Operation
 
 		err = c.Transaction(context.TODO(), func(ctx context.Context, tx *ClusterTx) error {
 			id := int64(entityID)
-			filter := OperationFilter{ID: &id}
-			ops, err := tx.GetOperations(filter)
+			filter := cluster.OperationFilter{ID: &id}
+			ops, err := cluster.GetOperations(ctx, tx.tx, filter)
 			if err != nil {
 				return err
 			}

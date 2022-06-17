@@ -3,10 +3,13 @@
 package sys
 
 import (
+	"io/ioutil"
 	"os/user"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/mdlayher/vsock"
 
@@ -17,6 +20,8 @@ import (
 	"github.com/lxc/lxd/shared"
 	"github.com/lxc/lxd/shared/idmap"
 	"github.com/lxc/lxd/shared/logger"
+	"github.com/lxc/lxd/shared/osarch"
+	"github.com/lxc/lxd/shared/version"
 )
 
 // InotifyTargetInfo records the inotify information associated with a given
@@ -92,6 +97,12 @@ type OS struct {
 
 	// VM features
 	VsockID uint32
+
+	// OS info
+	ReleaseInfo   map[string]string
+	KernelVersion version.DottedVersion
+	Uname         *shared.Utsname
+	BootTime      time.Time
 }
 
 // DefaultOS returns a fresh uninitialized OS instance with default values.
@@ -103,6 +114,7 @@ func DefaultOS() *OS {
 	}
 	newOS.InotifyWatch.Fd = -1
 	newOS.InotifyWatch.Targets = make(map[string]*InotifyTargetInfo)
+	newOS.ReleaseInfo = make(map[string]string)
 	return newOS
 }
 
@@ -169,7 +181,8 @@ func (s *OS) Init() ([]db.Warning, error) {
 	s.CGInfo = cgroup.GetInfo()
 
 	// Fill in the VsockID.
-	util.LoadModule("vhost_vsock")
+	_ = util.LoadModule("vhost_vsock")
+
 	vsockID, err := vsock.ContextID()
 	if err != nil || vsockID > 2147483647 {
 		// Fallback to the default ID for a host system if we're getting
@@ -178,6 +191,50 @@ func (s *OS) Init() ([]db.Warning, error) {
 	}
 
 	s.VsockID = vsockID
+
+	// Fill in the OS release info.
+	osInfo, err := osarch.GetLSBRelease()
+	if err != nil {
+		return nil, err
+	}
+
+	s.ReleaseInfo = osInfo
+
+	uname, err := shared.Uname()
+	if err != nil {
+		return nil, err
+	}
+	s.Uname = uname
+
+	kernelVersion, err := version.Parse(strings.Split(uname.Release, "-")[0])
+	if err == nil {
+		s.KernelVersion = *kernelVersion
+	}
+
+	// Fill in the boot time.
+	out, err := ioutil.ReadFile("/proc/stat")
+	if err != nil {
+		return nil, err
+	}
+
+	btime := int64(0)
+	for _, line := range strings.Split(string(out), "\n") {
+		if !strings.HasPrefix(line, "btime ") {
+			continue
+		}
+
+		fields := strings.Fields(line)
+		btime, err = strconv.ParseInt(fields[1], 10, 64)
+		if err != nil {
+			return nil, err
+		}
+
+		break
+	}
+
+	if btime > 0 {
+		s.BootTime = time.Unix(btime, 0)
+	}
 
 	return dbWarnings, nil
 }

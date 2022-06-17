@@ -68,6 +68,7 @@ var patches = []patch{
 	{name: "clustering_server_cert_trust", stage: patchPreDaemonStorage, run: patchClusteringServerCertTrust},
 	{name: "warnings_remove_empty_node", stage: patchPostDaemonStorage, run: patchRemoveWarningsWithEmptyNode},
 	{name: "dnsmasq_entries_include_device_name", stage: patchPostDaemonStorage, run: patchDnsmasqEntriesIncludeDeviceName},
+	{name: "storage_missing_snapshot_records", stage: patchPostDaemonStorage, run: patchGenericStorage},
 }
 
 type patch struct {
@@ -77,7 +78,7 @@ type patch struct {
 }
 
 func (p *patch) apply(d *Daemon) error {
-	logger.Infof("Applying patch %q", p.name)
+	logger.Info("Applying patch", logger.Ctx{"name": p.name})
 
 	err := p.run(p.name, d)
 	if err != nil {
@@ -395,7 +396,7 @@ func patchVMRenameUUIDKey(name string, d *Daemon) error {
 	oldUUIDKey := "volatile.vm.uuid"
 	newUUIDKey := "volatile.uuid"
 
-	return d.State().DB.Cluster.InstanceList(nil, func(inst db.Instance, p api.Project, profiles []api.Profile) error {
+	return d.State().DB.Cluster.InstanceList(nil, func(inst db.InstanceArgs, p api.Project, profiles []api.Profile) error {
 		if inst.Type != instancetype.VM {
 			return nil
 		}
@@ -415,13 +416,18 @@ func patchVMRenameUUIDKey(name string, d *Daemon) error {
 				}
 			}
 
-			snaps, err := tx.GetInstanceSnapshotsWithName(inst.Project, inst.Name)
+			snaps, err := tx.GetInstanceSnapshotsWithName(ctx, inst.Project, inst.Name)
 			if err != nil {
 				return err
 			}
 
 			for _, snap := range snaps {
-				uuid := snap.Config[oldUUIDKey]
+				config, err := dbCluster.GetInstanceConfig(ctx, tx.Tx(), snap.ID)
+				if err != nil {
+					return err
+				}
+
+				uuid := config[oldUUIDKey]
 				if uuid != "" {
 					changes := map[string]string{
 						oldUUIDKey: "",
@@ -452,7 +458,7 @@ func patchThinpoolTypoFix(name string, d *Daemon) error {
 		return fmt.Errorf("Failed to begin transaction: %w", err)
 	}
 
-	revert.Add(func() { tx.Rollback() })
+	revert.Add(func() { _ = tx.Rollback() })
 
 	// Fetch the IDs of all existing nodes.
 	nodeIDs, err := query.SelectIntegers(tx, "SELECT id FROM nodes")

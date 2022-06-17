@@ -12,6 +12,7 @@ import (
 	"github.com/gorilla/mux"
 
 	"github.com/lxc/lxd/lxd/db"
+	"github.com/lxc/lxd/lxd/db/operationtype"
 	"github.com/lxc/lxd/lxd/filter"
 	"github.com/lxc/lxd/lxd/lifecycle"
 	"github.com/lxc/lxd/lxd/operations"
@@ -421,17 +422,19 @@ func pruneResolvedWarningsTask(d *Daemon) (task.Func, task.Schedule) {
 			return pruneResolvedWarnings(ctx, d)
 		}
 
-		op, err := operations.OperationCreate(d.State(), "", operations.OperationClassTask, db.OperationWarningsPruneResolved, nil, nil, opRun, nil, nil, nil)
+		op, err := operations.OperationCreate(d.State(), "", operations.OperationClassTask, operationtype.WarningsPruneResolved, nil, nil, opRun, nil, nil, nil)
 		if err != nil {
 			logger.Error("Failed to start prune resolved warnings operation", logger.Ctx{"err": err})
 			return
 		}
 
 		logger.Info("Pruning resolved warnings")
-		_, err = op.Run()
+		err = op.Start()
 		if err != nil {
 			logger.Error("Failed to prune resolved warnings", logger.Ctx{"err": err})
 		}
+
+		_, _ = op.Wait(ctx)
 		logger.Info("Done pruning resolved warnings")
 	}
 

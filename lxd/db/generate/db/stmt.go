@@ -270,13 +270,21 @@ func (s *Stmt) create(buf *file.Buffer, replace bool) error {
 				otherTable := entityTable(otherRef)
 				params[i] += fmt.Sprintf(" JOIN %s ON %s.id = %s.%s_id", otherTable, otherTable, table, otherRef)
 			}
-			params[i] += fmt.Sprintf(" WHERE")
+			params[i] += " WHERE"
 			for _, other := range via[ref] {
-				otherRef := lex.Snake(other.Name)
-				otherTable := entityTable(otherRef)
-				params[i] += fmt.Sprintf(" %s.name = ? AND", otherTable)
+				join := other.Config.Get("join")
+				if join == "" {
+					join = other.Config.Get("leftjoin")
+				}
+				params[i] += fmt.Sprintf(" %s = ? AND", join)
 			}
-			params[i] += fmt.Sprintf(" %s.name = ?)", table)
+
+			join := field.Config.Get("join")
+			if join == "" {
+				join = field.Config.Get("leftjoin")
+			}
+
+			params[i] += fmt.Sprintf(" %s = ?)", join)
 		} else {
 			columns[i] = field.Column()
 			params[i] = "?"
@@ -439,7 +447,7 @@ func whereClause(fields []*Field) string {
 				otherTable := entityTable(otherRef)
 				subSelect += fmt.Sprintf(" JOIN %s ON %s.id = %s.%s_id", otherTable, otherTable, refTable, otherRef)
 			}
-			subSelect += fmt.Sprintf(" WHERE")
+			subSelect += " WHERE"
 			for _, other := range via[ref] {
 				otherRef := lex.Snake(other.Name)
 				otherTable := entityTable(otherRef)

@@ -14,9 +14,9 @@ import (
 	"github.com/flosch/pongo2"
 	"github.com/gorilla/mux"
 
-	"github.com/lxc/lxd/lxd/cluster"
 	"github.com/lxc/lxd/lxd/db"
 	dbCluster "github.com/lxc/lxd/lxd/db/cluster"
+	"github.com/lxc/lxd/lxd/db/operationtype"
 	"github.com/lxc/lxd/lxd/instance"
 	"github.com/lxc/lxd/lxd/operations"
 	"github.com/lxc/lxd/lxd/project"
@@ -216,7 +216,7 @@ func storagePoolVolumeSnapshotsTypePost(d *Daemon, r *http.Request) response.Res
 	resources := map[string][]string{}
 	resources["storage_volumes"] = []string{volumeName}
 
-	op, err := operations.OperationCreate(d.State(), projectParam(r), operations.OperationClassTask, db.OperationVolumeSnapshotCreate, resources, nil, snapshot, nil, nil, r)
+	op, err := operations.OperationCreate(d.State(), projectParam(r), operations.OperationClassTask, operationtype.VolumeSnapshotCreate, resources, nil, snapshot, nil, nil, r)
 	if err != nil {
 		return response.InternalError(err)
 	}
@@ -536,7 +536,7 @@ func storagePoolVolumeSnapshotTypePost(d *Daemon, r *http.Request) response.Resp
 	resources := map[string][]string{}
 	resources["storage_volume_snapshots"] = []string{volumeName}
 
-	op, err := operations.OperationCreate(d.State(), projectParam(r), operations.OperationClassTask, db.OperationVolumeSnapshotRename, resources, nil, snapshotRename, nil, nil, r)
+	op, err := operations.OperationCreate(d.State(), projectParam(r), operations.OperationClassTask, operationtype.VolumeSnapshotRename, resources, nil, snapshotRename, nil, nil, r)
 	if err != nil {
 		return response.InternalError(err)
 	}
@@ -1045,7 +1045,7 @@ func storagePoolVolumeSnapshotTypeDelete(d *Daemon, r *http.Request) response.Re
 	resources := map[string][]string{}
 	resources["storage_volume_snapshots"] = []string{volumeName}
 
-	op, err := operations.OperationCreate(d.State(), projectParam(r), operations.OperationClassTask, db.OperationVolumeSnapshotDelete, resources, nil, snapshotDelete, nil, nil, r)
+	op, err := operations.OperationCreate(d.State(), projectParam(r), operations.OperationClassTask, operationtype.VolumeSnapshotDelete, resources, nil, snapshotDelete, nil, nil, r)
 	if err != nil {
 		return response.InternalError(err)
 	}
@@ -1070,21 +1070,21 @@ func pruneExpireCustomVolumeSnapshotsTask(d *Daemon) (task.Func, task.Schedule) 
 			return pruneExpiredCustomVolumeSnapshots(ctx, d, expiredSnapshots)
 		}
 
-		op, err := operations.OperationCreate(d.State(), "", operations.OperationClassTask, db.OperationCustomVolumeSnapshotsExpire, nil, nil, opRun, nil, nil, nil)
+		op, err := operations.OperationCreate(d.State(), "", operations.OperationClassTask, operationtype.CustomVolumeSnapshotsExpire, nil, nil, opRun, nil, nil, nil)
 		if err != nil {
 			logger.Error("Failed to start expired custom volume snapshots operation", logger.Ctx{"err": err})
 			return
 		}
 
 		logger.Info("Pruning expired custom volume snapshots")
-		_, err = op.Run()
+		err = op.Start()
 		if err != nil {
 			logger.Error("Failed to expire backups", logger.Ctx{"err": err})
 		}
+
+		_, _ = op.Wait(ctx)
 		logger.Info("Done pruning expired custom volume snapshots")
 	}
-
-	f(context.Background())
 
 	first := true
 	schedule := func() (time.Duration, error) {
@@ -1127,9 +1127,12 @@ func pruneExpiredCustomVolumeSnapshots(ctx context.Context, d *Daemon, expiredSn
 
 func autoCreateCustomVolumeSnapshotsTask(d *Daemon) (task.Func, task.Schedule) {
 	f := func(ctx context.Context) {
+		s := d.State()
+
 		// Get projects.
 		var projects map[string]*dbCluster.Project
-		err := d.State().DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		var volumes, remoteVolumes []db.StorageVolumeArgs
+		err := s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
 			var err error
 			projs, err := dbCluster.GetProjects(ctx, tx.Tx(), dbCluster.ProjectFilter{})
 			if err != nil {
@@ -1142,22 +1145,12 @@ func autoCreateCustomVolumeSnapshotsTask(d *Daemon) (task.Func, task.Schedule) {
 				projects[p.Name] = &p
 			}
 
-			return err
-		})
-		if err != nil {
-			return
-		}
+			allVolumes, err := tx.GetStoragePoolVolumesWithType(db.StoragePoolVolumeTypeCustom)
+			if err != nil {
+				return fmt.Errorf("Failed getting volumes for auto custom volume snapshot task: %w", err)
+			}
 
-		allVolumes, err := d.db.Cluster.GetStoragePoolVolumesWithType(db.StoragePoolVolumeTypeCustom)
-		if err != nil {
-			logger.Error("Failed getting volumes for auto custom volume snapshot task", logger.Ctx{"err": err})
-			return
-		}
-
-		localNodeID := d.db.Cluster.GetNodeID()
-
-		var volumes, remoteVolumes []db.StorageVolumeArgs
-		err = d.State().DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+			localNodeID := d.db.Cluster.GetNodeID()
 			for _, v := range allVolumes {
 				schedule, ok := v.Config["snapshots.schedule"]
 				if !ok || schedule == "" {
@@ -1196,12 +1189,6 @@ func autoCreateCustomVolumeSnapshotsTask(d *Daemon) (task.Func, task.Schedule) {
 			var nodeCount int
 			var onlineNodeIDs []int64
 			err = d.db.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
-				// Get the offline threshold.
-				config, err := cluster.ConfigLoad(tx)
-				if err != nil {
-					return fmt.Errorf("Failed to load LXD config: %w", err)
-				}
-
 				// Get all the members.
 				nodes, err := tx.GetNodes()
 				if err != nil {
@@ -1212,7 +1199,7 @@ func autoCreateCustomVolumeSnapshotsTask(d *Daemon) (task.Func, task.Schedule) {
 
 				// Filter to online members.
 				for _, node := range nodes {
-					if node.IsOffline(config.OfflineThreshold()) {
+					if node.IsOffline(s.GlobalConfig.OfflineThreshold()) {
 						continue
 					}
 
@@ -1265,7 +1252,7 @@ func autoCreateCustomVolumeSnapshotsTask(d *Daemon) (task.Func, task.Schedule) {
 			return nil
 		}
 
-		op, err := operations.OperationCreate(d.State(), "", operations.OperationClassTask, db.OperationVolumeSnapshotCreate, nil, nil, opRun, nil, nil, nil)
+		op, err := operations.OperationCreate(s, "", operations.OperationClassTask, operationtype.VolumeSnapshotCreate, nil, nil, opRun, nil, nil, nil)
 		if err != nil {
 			logger.Error("Failed to start create volume snapshot operation", logger.Ctx{"err": err})
 			return
@@ -1273,11 +1260,12 @@ func autoCreateCustomVolumeSnapshotsTask(d *Daemon) (task.Func, task.Schedule) {
 
 		logger.Info("Creating scheduled volume snapshots")
 
-		_, err = op.Run()
+		err = op.Start()
 		if err != nil {
 			logger.Error("Failed to create scheduled volume snapshots", logger.Ctx{"err": err})
 		}
 
+		_, _ = op.Wait(ctx)
 		logger.Info("Done creating scheduled volume snapshots")
 	}
 

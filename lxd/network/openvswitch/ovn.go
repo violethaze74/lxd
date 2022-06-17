@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lxc/lxd/lxd/cluster"
+	clusterConfig "github.com/lxc/lxd/lxd/cluster/config"
 	"github.com/lxc/lxd/lxd/state"
 	"github.com/lxc/lxd/shared"
 )
@@ -170,7 +170,7 @@ type OVNRouterPeering struct {
 
 // NewOVN initialises new OVN client wrapper with the connection set in network.ovn.northbound_connection config.
 func NewOVN(s *state.State) (*OVN, error) {
-	nbConnection, err := cluster.ConfigGetString(s.DB.Cluster, "network.ovn.northbound_connection")
+	nbConnection, err := clusterConfig.GetString(s.DB.Cluster, "network.ovn.northbound_connection")
 	if err != nil {
 		return nil, fmt.Errorf("Failed to get OVN northbound connection string: %w", err)
 	}
@@ -1693,8 +1693,8 @@ func (o *OVN) LoadBalancerApply(loadBalancerName OVNLoadBalancer, routers []OVNR
 			)
 		} else {
 			args = append(args,
-				fmt.Sprintf("%s", ipToString(r.ListenAddress)),
-				fmt.Sprintf("%s", ipToString(r.TargetAddress)),
+				ipToString(r.ListenAddress),
+				ipToString(r.TargetAddress),
 			)
 		}
 	}
@@ -1817,7 +1817,7 @@ func (o *OVN) AddressSetAdd(addressSetPrefix OVNAddressSet, addresses ...net.IPN
 			// address sets already exist. If there was a problem creating the address set it will be
 			// revealead when we run the original command again next.
 			for ipVersion := range ipVersions {
-				o.nbctl("create", "address_set", fmt.Sprintf("name=%s_ip%d", addressSetPrefix, ipVersion))
+				_, _ = o.nbctl("create", "address_set", fmt.Sprintf("name=%s_ip%d", addressSetPrefix, ipVersion))
 			}
 
 			// Try original command again.

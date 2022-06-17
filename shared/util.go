@@ -8,6 +8,7 @@ import (
 	"encoding/gob"
 	"encoding/hex"
 	"fmt"
+	"github.com/lxc/lxd/lxd/revert"
 	"hash"
 	"io"
 	"io/ioutil"
@@ -76,7 +77,7 @@ func PathIsEmpty(path string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	// read in ONLY one file
 	_, err = f.Readdir(1)
@@ -404,7 +405,7 @@ func FileMove(oldPath string, newPath string) error {
 		return err
 	}
 
-	os.Remove(oldPath)
+	_ = os.Remove(oldPath)
 
 	return nil
 }
@@ -447,7 +448,7 @@ func FileCopy(source string, dest string) error {
 	if err != nil {
 		return err
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	d, err := os.Create(dest)
 	if err != nil {
@@ -460,7 +461,6 @@ func FileCopy(source string, dest string) error {
 			return err
 		}
 	}
-	defer d.Close()
 
 	_, err = io.Copy(d, s)
 	if err != nil {
@@ -469,10 +469,13 @@ func FileCopy(source string, dest string) error {
 
 	/* chown not supported on windows */
 	if runtime.GOOS != "windows" {
-		return d.Chown(uid, gid)
+		err = d.Chown(uid, gid)
+		if err != nil {
+			return err
+		}
 	}
 
-	return nil
+	return d.Close()
 }
 
 // DirCopy copies a directory recursively, overwriting the target if it exists.
@@ -743,7 +746,7 @@ func RunningInUserNS() bool {
 	if err != nil {
 		return false
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	buf := bufio.NewReader(file)
 	l, _, err := buf.ReadLine()
@@ -753,7 +756,7 @@ func RunningInUserNS() bool {
 
 	line := string(l)
 	var a, b, c int64
-	fmt.Sscanf(line, "%d %d %d", &a, &b, &c)
+	_, _ = fmt.Sscanf(line, "%d %d %d", &a, &b, &c)
 	if a == 0 && b == 0 && c == 4294967295 {
 		return false
 	}
@@ -790,20 +793,36 @@ func TextEditor(inPath string, inContent []byte) ([]byte, error) {
 		if err != nil {
 			return []byte{}, err
 		}
+		revert := revert.New()
+		defer revert.Fail()
+		revert.Add(func() {
+			_ = f.Close()
+			_ = os.Remove(f.Name())
+		})
 
 		err = os.Chmod(f.Name(), 0600)
 		if err != nil {
-			f.Close()
-			os.Remove(f.Name())
 			return []byte{}, err
 		}
 
-		f.Write(inContent)
-		f.Close()
+		_, err = f.Write(inContent)
+		if err != nil {
+			return []byte{}, err
+		}
+
+		err = f.Close()
+		if err != nil {
+			return []byte{}, err
+		}
 
 		path = fmt.Sprintf("%s.yaml", f.Name())
-		os.Rename(f.Name(), path)
-		defer os.Remove(path)
+		err = os.Rename(f.Name(), path)
+		if err != nil {
+			return []byte{}, err
+		}
+
+		revert.Success()
+		revert.Add(func() { _ = os.Remove(path) })
 	} else {
 		path = inPath
 	}
@@ -862,14 +881,14 @@ func RemoveDuplicatesFromString(s string, sep string) string {
 }
 
 type RunError struct {
-	msg    string
+	Msg    string
 	Err    error
 	Stdout string
 	Stderr string
 }
 
 func (e RunError) Error() string {
-	return e.msg
+	return e.Msg
 }
 
 // RunCommandSplit runs a command with a supplied environment and optional arguments and returns the
@@ -895,7 +914,7 @@ func RunCommandSplit(env []string, filesInherit []*os.File, name string, arg ...
 	err := cmd.Run()
 	if err != nil {
 		err := RunError{
-			msg:    fmt.Sprintf("Failed to run: %s %s: %s", name, strings.Join(arg, " "), strings.TrimSpace(stderr.String())),
+			Msg:    fmt.Sprintf("Failed to run: %s %s: %s", name, strings.Join(arg, " "), strings.TrimSpace(stderr.String())),
 			Stdout: stdout.String(),
 			Stderr: stderr.String(),
 			Err:    err,
@@ -947,7 +966,7 @@ func RunCommandWithFds(stdin io.Reader, stdout io.Writer, name string, arg ...st
 	err := cmd.Run()
 	if err != nil {
 		err := RunError{
-			msg:    fmt.Sprintf("Failed to run: %s %s: %s", name, strings.Join(arg, " "), strings.TrimSpace(buffer.String())),
+			Msg:    fmt.Sprintf("Failed to run: %s %s: %s", name, strings.Join(arg, " "), strings.TrimSpace(buffer.String())),
 			Stderr: buffer.String(),
 			Err:    err,
 		}
@@ -1027,7 +1046,7 @@ func SetProgressMetadata(metadata map[string]any, stage, displayPrefix string, p
 
 func DownloadFileHash(ctx context.Context, httpClient *http.Client, useragent string, progress func(progress ioprogress.ProgressData), canceler *cancel.HTTPRequestCanceller, filename string, url string, hash string, hashFunc hash.Hash, target io.WriteSeeker) (int64, error) {
 	// Always seek to the beginning
-	target.Seek(0, 0)
+	_, _ = target.Seek(0, 0)
 
 	var req *http.Request
 	var err error
@@ -1051,7 +1070,7 @@ func DownloadFileHash(ctx context.Context, httpClient *http.Client, useragent st
 	if err != nil {
 		return -1, err
 	}
-	defer r.Body.Close()
+	defer func() { _ = r.Body.Close() }()
 	defer close(doneCh)
 
 	if r.StatusCode != http.StatusOK {
@@ -1103,7 +1122,7 @@ func ParseNumberFromFile(file string) (int64, error) {
 	if err != nil {
 		return int64(0), err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	buf := make([]byte, 4096)
 	n, err := f.Read(buf)

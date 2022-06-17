@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lxc/lxd/lxd/db"
+	"github.com/lxc/lxd/lxd/db/operationtype"
 	"github.com/lxc/lxd/lxd/instance"
 	"github.com/lxc/lxd/lxd/instance/instancetype"
 	"github.com/lxc/lxd/lxd/operations"
@@ -26,18 +26,20 @@ func expireLogsTask(state *state.State) (task.Func, task.Schedule) {
 			return expireLogs(ctx, state)
 		}
 
-		op, err := operations.OperationCreate(state, "", operations.OperationClassTask, db.OperationLogsExpire, nil, nil, opRun, nil, nil, nil)
+		op, err := operations.OperationCreate(state, "", operations.OperationClassTask, operationtype.LogsExpire, nil, nil, opRun, nil, nil, nil)
 		if err != nil {
 			logger.Error("Failed to start log expiry operation", logger.Ctx{"err": err})
 			return
 		}
 
-		logger.Infof("Expiring log files")
-		_, err = op.Run()
+		logger.Info("Expiring log files")
+		err = op.Start()
 		if err != nil {
 			logger.Error("Failed to expire logs", logger.Ctx{"err": err})
 		}
-		logger.Infof("Done expiring log files")
+
+		_, _ = op.Wait(ctx)
+		logger.Info("Done expiring log files")
 	}
 
 	return f, task.Daily()

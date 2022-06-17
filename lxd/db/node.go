@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/lxc/lxd/lxd/db/cluster"
+	"github.com/lxc/lxd/lxd/db/operationtype"
 	"github.com/lxc/lxd/lxd/db/query"
 	"github.com/lxc/lxd/lxd/util"
 	"github.com/lxc/lxd/shared"
@@ -200,7 +201,7 @@ func (n NodeInfo) ToAPI(cluster *Cluster, node *Node, leader string) (*api.Clust
 	}
 
 	if n.IsOffline(offlineThreshold) {
-		result.Message = fmt.Sprintf("No heartbeat for %s (%s)", time.Now().Sub(n.Heartbeat), n.Heartbeat)
+		result.Message = fmt.Sprintf("No heartbeat for %s (%s)", time.Since(n.Heartbeat), n.Heartbeat)
 	}
 
 	return &result, nil
@@ -450,38 +451,27 @@ func (c *ClusterTx) nodes(pending bool, where string, args ...any) ([]NodeInfo, 
 	sql := "SELECT node_id, role FROM nodes_roles"
 
 	nodeRoles := map[int64][]ClusterRole{}
-	rows, err := c.tx.Query(sql)
-	if err != nil {
-		// Don't fail on a missing table, we need to handle updates
-		if err.Error() != "no such table: nodes_roles" {
-			return nil, err
-		}
-	} else {
-		defer rows.Close()
+	err := c.QueryScan(sql, func(scan func(dest ...any) error) error {
+		var nodeID int64
+		var role int
 
-		for i := 0; rows.Next(); i++ {
-			var nodeID int64
-			var role int
-			err := rows.Scan(&nodeID, &role)
-			if err != nil {
-				return nil, err
-			}
-
-			if nodeRoles[nodeID] == nil {
-				nodeRoles[nodeID] = []ClusterRole{}
-			}
-
-			roleName := string(ClusterRoles[role])
-
-			nodeRoles[nodeID] = append(nodeRoles[nodeID], ClusterRole(roleName))
-		}
-
-		err = rows.Err()
+		err := scan(&nodeID, &role)
 		if err != nil {
-			return nil, err
+			return err
 		}
 
-		rows.Close()
+		if nodeRoles[nodeID] == nil {
+			nodeRoles[nodeID] = []ClusterRole{}
+		}
+
+		roleName := string(ClusterRoles[role])
+		nodeRoles[nodeID] = append(nodeRoles[nodeID], ClusterRole(roleName))
+
+		return nil
+	})
+	if err != nil && err.Error() != "no such table: nodes_roles" {
+		// Don't fail on a missing table, we need to handle updates
+		return nil, err
 	}
 
 	// Get node groups
@@ -489,35 +479,26 @@ func (c *ClusterTx) nodes(pending bool, where string, args ...any) ([]NodeInfo, 
 JOIN cluster_groups ON cluster_groups.id = nodes_cluster_groups.group_id`
 	nodeGroups := map[int64][]string{}
 
-	rows, err = c.tx.Query(sql)
-	if err != nil {
-		// Don't fail on a missing table, we need to handle updates
-		if err.Error() != "no such table: nodes_cluster_groups" {
-			return nil, err
-		}
-	} else {
-		defer rows.Close()
+	err = c.QueryScan(sql, func(scan func(dest ...any) error) error {
+		var nodeID int64
+		var group string
 
-		for i := 0; rows.Next(); i++ {
-			var nodeID int64
-			var group string
-
-			err := rows.Scan(&nodeID, &group)
-			if err != nil {
-				return nil, err
-			}
-
-			if nodeGroups[nodeID] == nil {
-				nodeGroups[nodeID] = []string{}
-			}
-
-			nodeGroups[nodeID] = append(nodeGroups[nodeID], group)
-		}
-
-		err = rows.Err()
+		err := scan(&nodeID, &group)
 		if err != nil {
-			return nil, err
+			return err
 		}
+
+		if nodeGroups[nodeID] == nil {
+			nodeGroups[nodeID] = []string{}
+		}
+
+		nodeGroups[nodeID] = append(nodeGroups[nodeID], group)
+
+		return nil
+	})
+	if err != nil && err.Error() != "no such table: nodes_cluster_groups" {
+		// Don't fail on a missing table, we need to handle updates
+		return nil, err
 	}
 
 	// Process node entries
@@ -542,10 +523,10 @@ JOIN cluster_groups ON cluster_groups.id = nodes_cluster_groups.group_id`
 
 	if pending {
 		// Include only pending nodes
-		sql += fmt.Sprintf("WHERE state=? ")
+		sql += "WHERE state=? "
 	} else {
 		// Include created and evacuated nodes
-		sql += fmt.Sprintf("WHERE state!=? ")
+		sql += "WHERE state!=? "
 	}
 
 	args = append([]any{ClusterMemberStatePending}, args...)
@@ -559,7 +540,7 @@ JOIN cluster_groups ON cluster_groups.id = nodes_cluster_groups.group_id`
 	if err != nil {
 		return nil, err
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	err = query.SelectObjects(stmt, dest, args...)
 	if err != nil {
@@ -582,7 +563,7 @@ JOIN cluster_groups ON cluster_groups.id = nodes_cluster_groups.group_id`
 		}
 	}
 
-	config, err := c.GetConfig("node")
+	config, err := cluster.GetConfig(context.TODO(), c.Tx(), "node")
 	if err != nil {
 		return nil, fmt.Errorf("Failed to fetch nodes config: %w", err)
 	}
@@ -656,8 +637,8 @@ func (c *ClusterTx) BootstrapNode(name string, address string) error {
 }
 
 // UpdateNodeConfig updates the replaces the node's config with the specified config.
-func (c *ClusterTx) UpdateNodeConfig(id int64, config map[string]string) error {
-	err := c.UpdateConfig("node", int(id), config)
+func (c *ClusterTx) UpdateNodeConfig(ctx context.Context, id int64, config map[string]string) error {
+	err := cluster.UpdateConfig(ctx, c.Tx(), "node", int(id), config)
 	if err != nil {
 		return fmt.Errorf("Unable to update node config: %w", err)
 	}
@@ -973,7 +954,7 @@ SELECT fingerprint, node_id FROM images JOIN images_nodes ON images.id=images_no
 	if err != nil {
 		return "", err
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 	err = query.SelectObjects(stmt, dest)
 	if err != nil {
 		return "", fmt.Errorf("Failed to get image list for node %d: %w", id, err)
@@ -1160,13 +1141,13 @@ func (c *ClusterTx) GetNodeWithLeastInstances(archs []int, defaultArch int, grou
 
 		// Fetch the number of instances currently being created on this node.
 		pending, err := query.Count(
-			c.tx, "operations", "node_id=? AND type=?", node.ID, OperationInstanceCreate)
+			c.tx, "operations", "node_id=? AND type=?", node.ID, operationtype.InstanceCreate)
 		if err != nil {
 			return "", fmt.Errorf("Failed to get pending instances count: %w", err)
 		}
 
 		count := created + pending
-		if containers == -1 || count < containers || (isDefaultArch == true && isDefaultArchChosen == false) {
+		if containers == -1 || count < containers || (isDefaultArch && !isDefaultArchChosen) {
 			containers = count
 			name = node.Name
 			if isDefaultArch {

@@ -10,7 +10,7 @@ import (
 
 	"gopkg.in/yaml.v2"
 
-	"github.com/lxc/lxd/lxd/db"
+	"github.com/lxc/lxd/lxd/db/operationtype"
 	"github.com/lxc/lxd/lxd/operations"
 	"github.com/lxc/lxd/lxd/task"
 	"github.com/lxc/lxd/lxd/util"
@@ -90,18 +90,20 @@ func instanceRefreshTypesTask(d *Daemon) (task.Func, task.Schedule) {
 			}
 		}
 
-		op, err := operations.OperationCreate(d.State(), "", operations.OperationClassTask, db.OperationInstanceTypesUpdate, nil, nil, opRun, nil, nil, nil)
+		op, err := operations.OperationCreate(d.State(), "", operations.OperationClassTask, operationtype.InstanceTypesUpdate, nil, nil, opRun, nil, nil, nil)
 		if err != nil {
 			logger.Error("Failed to start instance types update operation", logger.Ctx{"err": err})
 			return
 		}
 
 		logger.Info("Updating instance types")
-		_, err = op.Run()
+		err = op.Start()
 		if err != nil {
 			logger.Error("Failed to update instance types", logger.Ctx{"err": err})
 		}
-		logger.Infof("Done updating instance types")
+
+		_, _ = op.Wait(ctx)
+		logger.Info("Done updating instance types")
 	}
 
 	return f, task.Daily()
@@ -136,7 +138,7 @@ func instanceRefreshTypes(ctx context.Context, d *Daemon) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 
 		if resp.StatusCode != http.StatusOK {
 			return fmt.Errorf("Failed to get %s", url)
@@ -157,7 +159,7 @@ func instanceRefreshTypes(ctx context.Context, d *Daemon) error {
 
 	// Set an initial value from the cache
 	if instanceTypes == nil {
-		instanceLoadCache()
+		_ = instanceLoadCache()
 	}
 
 	// Get the list of instance type sources

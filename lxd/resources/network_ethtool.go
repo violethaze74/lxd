@@ -151,7 +151,7 @@ func ethtoolAddCardInfo(name string, info *api.ResourcesNetworkCard) error {
 	if err != nil {
 		return fmt.Errorf("Failed to open IPPROTO_IP socket: %w", err)
 	}
-	defer unix.Close(ethtoolFd)
+	defer func() { _ = unix.Close(ethtoolFd) }()
 
 	// Driver info
 	ethDrvInfo := ethtoolDrvInfo{
@@ -169,7 +169,7 @@ func ethtoolAddCardInfo(name string, info *api.ResourcesNetworkCard) error {
 
 	info.FirmwareVersion = string(bytes.Trim(ethDrvInfo.fwVersion[:], "\x00"))
 
-	return nil
+	return unix.Close(ethtoolFd)
 }
 
 func ethtoolGset(ethtoolFd int, req *ethtoolReq, info *api.ResourcesNetworkCardPort) error {
@@ -181,6 +181,11 @@ func ethtoolGset(ethtoolFd int, req *ethtoolReq, info *api.ResourcesNetworkCardP
 
 	_, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(ethtoolFd), unix.SIOCETHTOOL, uintptr(unsafe.Pointer(req)))
 	if errno != 0 {
+		if unix.Errno(errno) == unix.EOPNOTSUPP {
+			// Driver doesn't support it, skip.
+			return nil
+		}
+
 		return fmt.Errorf("Failed to ETHTOOL_GSET: %w", unix.Errno(errno))
 	}
 
@@ -357,7 +362,7 @@ func ethtoolAddPortInfo(info *api.ResourcesNetworkCardPort) error {
 	if err != nil {
 		return fmt.Errorf("Failed to open IPPROTO_IP socket: %w", err)
 	}
-	defer unix.Close(ethtoolFd)
+	defer func() { _ = unix.Close(ethtoolFd) }()
 
 	// Prepare the request struct
 	req := ethtoolReq{}
@@ -395,5 +400,5 @@ func ethtoolAddPortInfo(info *api.ResourcesNetworkCardPort) error {
 		return ethtoolGset(ethtoolFd, &req, info)
 	}
 
-	return nil
+	return unix.Close(ethtoolFd)
 }

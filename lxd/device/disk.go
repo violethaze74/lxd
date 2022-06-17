@@ -656,9 +656,7 @@ func (d *disk) detectVMPoolMountOpts() []string {
 
 // startVM starts the disk device for a virtual machine instance.
 func (d *disk) startVM() (*deviceConfig.RunConfig, error) {
-	runConf := deviceConfig.RunConfig{
-		Revert: revert.New(),
-	}
+	runConf := deviceConfig.RunConfig{}
 
 	revert := revert.New()
 	defer revert.Fail()
@@ -692,9 +690,9 @@ func (d *disk) startVM() (*deviceConfig.RunConfig, error) {
 			return nil, fmt.Errorf("Failed opening source path %q: %w", isoPath, err)
 		}
 
-		revert.Add(func() { f.Close() })
+		revert.Add(func() { _ = f.Close() })
 		runConf.PostHooks = append(runConf.PostHooks, f.Close)
-		runConf.Revert.Add(func() { f.Close() }) // Close file on VM start failure.
+		runConf.Revert = func() { _ = f.Close() } // Close file on VM start failure.
 
 		// Encode the file descriptor and original isoPath into the DevPath field.
 		runConf.Mounts = []deviceConfig.MountEntryItem{
@@ -798,7 +796,7 @@ func (d *disk) startVM() (*deviceConfig.RunConfig, error) {
 				err = func() error {
 					sockPath, pidPath := d.vmVirtiofsdPaths()
 					logPath := filepath.Join(d.inst.LogPath(), fmt.Sprintf("disk.%s.log", d.name))
-					os.Remove(logPath) // Remove old log if needed.
+					_ = os.Remove(logPath) // Remove old log if needed.
 
 					revertFunc, unixListener, err := DiskVMVirtiofsdStart(d.state.OS.ExecPath, d.inst, sockPath, pidPath, logPath, mount.DevPath, rawIDMaps)
 					if err != nil {
@@ -807,10 +805,10 @@ func (d *disk) startVM() (*deviceConfig.RunConfig, error) {
 							d.logger.Warn("Unable to use virtio-fs for device, using 9p as a fallback", logger.Ctx{"err": errUnsupported})
 
 							if errUnsupported == ErrMissingVirtiofsd {
-								d.state.DB.Cluster.UpsertWarningLocalNode(d.inst.Project(), cluster.TypeInstance, d.inst.ID(), db.WarningMissingVirtiofsd, "Using 9p as a fallback")
+								_ = d.state.DB.Cluster.UpsertWarningLocalNode(d.inst.Project(), cluster.TypeInstance, d.inst.ID(), db.WarningMissingVirtiofsd, "Using 9p as a fallback")
 							} else {
 								// Resolve previous warning.
-								warnings.ResolveWarningsByLocalNodeAndProjectAndType(d.state.DB.Cluster, d.inst.Project(), db.WarningMissingVirtiofsd)
+								_ = warnings.ResolveWarningsByLocalNodeAndProjectAndType(d.state.DB.Cluster, d.inst.Project(), db.WarningMissingVirtiofsd)
 							}
 
 							return nil
@@ -824,7 +822,7 @@ func (d *disk) startVM() (*deviceConfig.RunConfig, error) {
 					runConf.PostHooks = append(runConf.PostHooks, unixListener.Close)
 
 					// Resolve previous warning
-					warnings.ResolveWarningsByLocalNodeAndProjectAndType(d.state.DB.Cluster, d.inst.Project(), db.WarningMissingVirtiofsd)
+					_ = warnings.ResolveWarningsByLocalNodeAndProjectAndType(d.state.DB.Cluster, d.inst.Project(), db.WarningMissingVirtiofsd)
 
 					// Add the socket path to the mount options to indicate to the qemu driver
 					// that this share is available.
@@ -844,11 +842,11 @@ func (d *disk) startVM() (*deviceConfig.RunConfig, error) {
 				// Start virtfs-proxy-helper for 9p share (this will rewrite mount.DevPath with
 				// socket FD number so must come after starting virtiofsd).
 				err = func() error {
-					revertFunc, sockFile, err := DiskVMVirtfsProxyStart(d.state.OS.ExecPath, d.vmVirtfsProxyHelperPaths(), mount.DevPath, rawIDMaps)
+					sockFile, cleanup, err := DiskVMVirtfsProxyStart(d.state.OS.ExecPath, d.vmVirtfsProxyHelperPaths(), mount.DevPath, rawIDMaps)
 					if err != nil {
 						return err
 					}
-					revert.Add(revertFunc)
+					revert.Add(cleanup)
 
 					// Request the unix socket is closed after QEMU has connected on startup.
 					runConf.PostHooks = append(runConf.PostHooks, sockFile.Close)
@@ -866,9 +864,9 @@ func (d *disk) startVM() (*deviceConfig.RunConfig, error) {
 				if err != nil {
 					return nil, err
 				}
-				revert.Add(func() { f.Close() })
+				revert.Add(func() { _ = f.Close() })
 				runConf.PostHooks = append(runConf.PostHooks, f.Close)
-				runConf.Revert.Add(func() { f.Close() }) // Close file on VM start failure.
+				runConf.Revert = func() { _ = f.Close() } // Close file on VM start failure.
 
 				// Encode the file descriptor and original srcPath into the DevPath field.
 				mount.DevPath = fmt.Sprintf("%s:%d:%s", DiskFileDescriptorMountPrefix, f.Fd(), mount.DevPath)
@@ -1181,7 +1179,7 @@ func (d *disk) mountPoolVolume() (func(), string, error) {
 	if err != nil {
 		return nil, "", fmt.Errorf("Failed mounting storage volume %q of type %q on storage pool %q: %w", volumeName, volumeTypeName, d.pool.Name(), err)
 	}
-	revert.Add(func() { d.pool.UnmountCustomVolume(storageProjectName, volumeName, nil) })
+	revert.Add(func() { _, _ = d.pool.UnmountCustomVolume(storageProjectName, volumeName, nil) })
 
 	_, vol, err := d.state.DB.Cluster.GetLocalStoragePoolVolume(storageProjectName, volumeName, db.StoragePoolVolumeTypeCustom, d.pool.ID())
 	if err != nil {
@@ -1206,9 +1204,9 @@ func (d *disk) mountPoolVolume() (func(), string, error) {
 		}
 	}
 
-	revertExternal := revert.Clone() // Clone before calling revert.Success() so we can return the Fail func.
+	cleanup := revert.Clone().Fail // Clone before calling revert.Success() so we can return the Fail func.
 	revert.Success()
-	return revertExternal.Fail, srcPath, err
+	return cleanup, srcPath, err
 }
 
 // createDevice creates a disk device mount on host.
@@ -1296,7 +1294,7 @@ func (d *disk) createDevice(srcPath string) (func(), string, bool, error) {
 			if err != nil {
 				return nil, "", false, err
 			}
-			defer f.Close()
+			defer func() { _ = f.Close() }()
 
 			srcPath = fmt.Sprintf("/proc/self/fd/%d", f.Fd())
 		}
@@ -1325,7 +1323,7 @@ func (d *disk) createDevice(srcPath string) (func(), string, bool, error) {
 			return nil, "", false, err
 		}
 
-		f.Close()
+		_ = f.Close()
 	} else {
 		err := os.Mkdir(devPath, 0700)
 		if err != nil {
@@ -1338,11 +1336,11 @@ func (d *disk) createDevice(srcPath string) (func(), string, bool, error) {
 	if err != nil {
 		return nil, "", false, err
 	}
-	revert.Add(func() { DiskMountClear(devPath) })
+	revert.Add(func() { _ = DiskMountClear(devPath) })
 
-	revertExternal := revert.Clone() // Clone before calling revert.Success() so we can return the Fail func.
+	cleanup := revert.Clone().Fail // Clone before calling revert.Success() so we can return the Fail func.
 	revert.Success()
-	return revertExternal.Fail, devPath, isFile, err
+	return cleanup, devPath, isFile, err
 }
 
 // localSourceOpen opens a local disk source path and returns a file handle to it.
@@ -1365,7 +1363,7 @@ func (d *disk) localSourceOpen(srcPath string) (*os.File, error) {
 		if err != nil {
 			return nil, fmt.Errorf("Failed opening allowed parent source path %q: %w", d.restrictedParentSourcePath, err)
 		}
-		defer allowedParent.Close()
+		defer func() { _ = allowedParent.Close() }()
 
 		// For restricted source paths we use openat2 to prevent resolving to a mount path above the
 		// allowed parent source path. Requires Linux kernel >= 5.6.
@@ -1451,8 +1449,8 @@ func (d *disk) storagePoolVolumeAttachShift(projectName, poolName, volumeName st
 
 		if shared.IsFalseOrEmpty(poolVolumePut.Config["security.shifted"]) {
 			volumeUsedBy := []instance.Instance{}
-			err = storagePools.VolumeUsedByInstanceDevices(d.state, poolName, projectName, volume, true, func(dbInst db.Instance, project api.Project, profiles []api.Profile, usedByDevices []string) error {
-				inst, err := instance.Load(d.state, db.InstanceToArgs(&dbInst), profiles)
+			err = storagePools.VolumeUsedByInstanceDevices(d.state, poolName, projectName, volume, true, func(dbInst db.InstanceArgs, project api.Project, profiles []api.Profile, usedByDevices []string) error {
+				inst, err := instance.Load(d.state, dbInst, profiles)
 				if err != nil {
 					return err
 				}
@@ -1847,7 +1845,7 @@ func (d *disk) getParentBlocks(path string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	scanner := bufio.NewScanner(file)
 	match := ""
@@ -1917,9 +1915,7 @@ func (d *disk) getParentBlocks(path string) ([]string, error) {
 						return nil, err
 					}
 
-					for _, dev := range subDevices {
-						devices = append(devices, dev)
-					}
+					devices = append(devices, subDevices...)
 				}
 			} else {
 				continue
@@ -2061,7 +2057,7 @@ local-hostname: %s
 	}
 
 	// Remove the config drive folder.
-	os.RemoveAll(scratchDir)
+	_ = os.RemoveAll(scratchDir)
 
 	return isoPath, nil
 }

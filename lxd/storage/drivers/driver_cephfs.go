@@ -27,7 +27,8 @@ type cephfs struct {
 func (d *cephfs) load() error {
 	// Register the patches.
 	d.patches = map[string]func() error{
-		"storage_lvm_skipactivation": nil,
+		"storage_lvm_skipactivation":       nil,
+		"storage_missing_snapshot_records": nil,
 	}
 
 	// Done if previously loaded.
@@ -126,7 +127,7 @@ func (d *cephfs) Create() error {
 	if err != nil {
 		return fmt.Errorf("Failed to create temporary directory under: %w", err)
 	}
-	defer os.RemoveAll(mountPath)
+	defer func() { _ = os.RemoveAll(mountPath) }()
 
 	err = os.Chmod(mountPath, 0700)
 	if err != nil {
@@ -152,7 +153,7 @@ func (d *cephfs) Create() error {
 	if err != nil {
 		return err
 	}
-	defer forceUnmount(mountPoint)
+	defer func() { _, _ = forceUnmount(mountPoint) }()
 
 	// Create the path if missing.
 	err = os.MkdirAll(filepath.Join(mountPoint, fsPath), 0755)
@@ -184,7 +185,7 @@ func (d *cephfs) Delete(op *operations.Operation) error {
 	if err != nil {
 		return fmt.Errorf("Failed to create temporary directory under: %w", err)
 	}
-	defer os.RemoveAll(mountPath)
+	defer func() { _ = os.RemoveAll(mountPath) }()
 
 	err = os.Chmod(mountPath, 0700)
 	if err != nil {
@@ -209,7 +210,7 @@ func (d *cephfs) Delete(op *operations.Operation) error {
 	if err != nil {
 		return err
 	}
-	defer forceUnmount(mountPoint)
+	defer func() { _, _ = forceUnmount(mountPoint) }()
 
 	// On delete, wipe everything in the directory.
 	err = wipeDirectory(GetPoolMountPath(d.name))

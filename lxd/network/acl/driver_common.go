@@ -13,6 +13,7 @@ import (
 	"github.com/lxc/lxd/lxd/cluster"
 	"github.com/lxc/lxd/lxd/cluster/request"
 	"github.com/lxc/lxd/lxd/db"
+	dbCluster "github.com/lxc/lxd/lxd/db/cluster"
 	"github.com/lxc/lxd/lxd/network/openvswitch"
 	"github.com/lxc/lxd/lxd/project"
 	"github.com/lxc/lxd/lxd/revert"
@@ -123,7 +124,7 @@ func (d *common) usedBy(firstOnly bool) ([]string, error) {
 	// Find all networks, profiles and instance NICs that use this Network ACL.
 	err := UsedBy(d.state, d.projectName, func(_ []string, usageType any, _ string, _ map[string]string) error {
 		switch u := usageType.(type) {
-		case db.Instance:
+		case db.InstanceArgs:
 			uri := fmt.Sprintf("/%s/instances/%s", version.APIVersion, u.Name)
 			if u.Project != project.Default {
 				uri += fmt.Sprintf("?project=%s", u.Project)
@@ -137,7 +138,7 @@ func (d *common) usedBy(firstOnly bool) ([]string, error) {
 			}
 
 			usedBy = append(usedBy, uri)
-		case db.Profile:
+		case dbCluster.Profile:
 			uri := fmt.Sprintf("/%s/profiles/%s", version.APIVersion, u.Name)
 			if u.Project != project.Default {
 				uri += fmt.Sprintf("?project=%s", u.Project)
@@ -595,7 +596,7 @@ func (d *common) Update(config *api.NetworkACLPut, clientType request.ClientType
 		d.init(d.state, d.id, d.projectName, d.info)
 
 		revert.Add(func() {
-			d.state.DB.Cluster.UpdateNetworkACL(d.id, &oldConfig)
+			_ = d.state.DB.Cluster.UpdateNetworkACL(d.id, &oldConfig)
 			d.info.NetworkACLPut = oldConfig
 			d.init(d.state, d.id, d.projectName, d.info)
 		})
@@ -648,11 +649,11 @@ func (d *common) Update(config *api.NetworkACLPut, clientType request.ClientType
 		// apply those rules to each network affected by the ACL, so pass the full list of OVN networks
 		// affected by this ACL (either because the ACL is assigned directly or because it is assigned to
 		// an OVN NIC in an instance or profile).
-		r, err := OVNEnsureACLs(d.state, d.logger, client, d.projectName, aclNameIDs, aclOVNNets, []string{d.info.Name}, true)
+		cleanup, err := OVNEnsureACLs(d.state, d.logger, client, d.projectName, aclNameIDs, aclOVNNets, []string{d.info.Name}, true)
 		if err != nil {
 			return fmt.Errorf("Failed ensuring ACL is configured in OVN: %w", err)
 		}
-		revert.Add(r.Fail)
+		revert.Add(cleanup)
 
 		// Run unused port group cleanup in case any formerly referenced ACL in this ACL's rules means that
 		// an ACL port group is now considered unused.
@@ -741,7 +742,7 @@ func (d *common) GetLog(clientType request.ClientType) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("Couldn't open OVN log file: %w", err)
 	}
-	defer logFile.Close()
+	defer func() { _ = logFile.Close() }()
 
 	logEntries := []string{}
 	scanner := bufio.NewScanner(logFile)
@@ -774,7 +775,7 @@ func (d *common) GetLog(clientType request.ClientType) (string, error) {
 			if err != nil {
 				return err
 			}
-			defer entries.Close()
+			defer func() { _ = entries.Close() }()
 
 			// Prevent concurrent writes to the log entries slice.
 			mu.Lock()

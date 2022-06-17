@@ -1,6 +1,7 @@
 package device
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -139,7 +140,7 @@ func DiskMount(srcPath string, dstPath string, readonly bool, recursive bool, pr
 	}
 
 	// Remount bind mounts in readonly mode if requested
-	if readonly == true && flags&unix.MS_BIND == unix.MS_BIND {
+	if readonly && flags&unix.MS_BIND == unix.MS_BIND {
 		flags = unix.MS_RDONLY | unix.MS_BIND | unix.MS_REMOUNT
 		err = unix.Mount("", dstPath, fsName, uintptr(flags), "")
 		if err != nil {
@@ -182,7 +183,7 @@ func diskCephRbdMap(clusterName string, userName string, poolName string, volume
 		"--cluster", clusterName,
 		"--pool", poolName,
 		"map",
-		fmt.Sprintf("%s", volumeName))
+		volumeName)
 	if err != nil {
 		return "", err
 	}
@@ -197,7 +198,7 @@ func diskCephRbdMap(clusterName string, userName string, poolName string, volume
 }
 
 func diskCephRbdUnmap(deviceName string) error {
-	unmapImageName := fmt.Sprintf("%s", deviceName)
+	unmapImageName := deviceName
 	busyCount := 0
 again:
 	_, err := shared.RunCommand(
@@ -297,8 +298,9 @@ func diskAddRootUserNSEntry(idmaps []idmap.IdmapEntry, hostRootID int64) []idmap
 
 // DiskVMVirtfsProxyStart starts a new virtfs-proxy-helper process.
 // If the idmaps slice is supplied then the proxy process is run inside a user namespace using the supplied maps.
-// Returns a revert function, and a file handle to the proxy process.
-func DiskVMVirtfsProxyStart(execPath string, pidPath string, sharePath string, idmaps []idmap.IdmapEntry) (func(), *os.File, error) {
+// Returns a file handle to the proxy process and a revert fail function that can be used to undo this function if
+// a subsequent step fails,
+func DiskVMVirtfsProxyStart(execPath string, pidPath string, sharePath string, idmaps []idmap.IdmapEntry) (*os.File, revert.Hook, error) {
 	revert := revert.New()
 	defer revert.Fail()
 
@@ -320,43 +322,43 @@ func DiskVMVirtfsProxyStart(execPath string, pidPath string, sharePath string, i
 	if err != nil {
 		return nil, nil, fmt.Errorf("Failed to create unix listener for virtfs-proxy-helper: %w", err)
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 
 	cDial, err := net.Dial("unix", listener.Addr().String())
 	if err != nil {
 		return nil, nil, fmt.Errorf("Failed to connect to virtfs-proxy-helper unix listener: %w", err)
 	}
-	defer cDial.Close()
+	defer func() { _ = cDial.Close() }()
 
 	cDialUnix, ok := cDial.(*net.UnixConn)
 	if !ok {
 		return nil, nil, fmt.Errorf("Dialled virtfs-proxy-helper connection isn't unix socket")
 	}
-	defer cDialUnix.Close()
+	defer func() { _ = cDialUnix.Close() }()
 
 	cDialUnixFile, err := cDialUnix.File()
 	if err != nil {
 		return nil, nil, fmt.Errorf("Failed getting virtfs-proxy-helper unix dialed file: %w", err)
 	}
-	revert.Add(func() { cDialUnixFile.Close() })
+	revert.Add(func() { _ = cDialUnixFile.Close() })
 
 	cAccept, err := listener.Accept()
 	if err != nil {
 		return nil, nil, fmt.Errorf("Failed to accept connection to virtfs-proxy-helper unix listener: %w", err)
 	}
-	defer cAccept.Close()
+	defer func() { _ = cAccept.Close() }()
 
 	cAcceptUnix, ok := cAccept.(*net.UnixConn)
 	if !ok {
 		return nil, nil, fmt.Errorf("Accepted virtfs-proxy-helper connection isn't unix socket")
 	}
-	defer cAcceptUnix.Close()
+	defer func() { _ = cAcceptUnix.Close() }()
 
 	acceptFile, err := cAcceptUnix.File()
 	if err != nil {
 		return nil, nil, fmt.Errorf("Failed getting virtfs-proxy-helper unix listener file: %w", err)
 	}
-	defer acceptFile.Close()
+	defer func() { _ = acceptFile.Close() }()
 
 	// Start the virtfs-proxy-helper process in non-daemon mode and as root so that when the VM process is
 	// started as an unprivileged user, we can still share directories that process cannot access.
@@ -375,16 +377,16 @@ func DiskVMVirtfsProxyStart(execPath string, pidPath string, sharePath string, i
 		return nil, nil, fmt.Errorf("Failed to start virtfs-proxy-helper: %w", err)
 	}
 
-	revert.Add(func() { proc.Stop() })
+	revert.Add(func() { _ = proc.Stop() })
 
 	err = proc.Save(pidPath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("Failed to save virtfs-proxy-helper state: %w", err)
 	}
 
-	revertExternal := revert.Clone()
+	cleanup := revert.Clone().Fail
 	revert.Success()
-	return revertExternal.Fail, cDialUnixFile, err
+	return cDialUnixFile, cleanup, err
 }
 
 // DiskVMVirtfsProxyStop stops the virtfs-proxy-helper process.
@@ -401,7 +403,7 @@ func DiskVMVirtfsProxyStop(pidPath string) error {
 		}
 
 		// Remove PID file.
-		os.Remove(pidPath)
+		_ = os.Remove(pidPath)
 	}
 
 	return nil
@@ -421,7 +423,7 @@ func DiskVMVirtiofsdStart(execPath string, inst instance.Instance, socketPath st
 	}
 
 	// Remove old socket if needed.
-	os.Remove(socketPath)
+	_ = os.Remove(socketPath)
 
 	// Locate virtiofsd.
 	cmd, err := exec.LookPath("virtiofsd")
@@ -452,7 +454,7 @@ func DiskVMVirtiofsdStart(execPath string, inst instance.Instance, socketPath st
 	if err != nil {
 		return nil, nil, err
 	}
-	defer socketFileDir.Close()
+	defer func() { _ = socketFileDir.Close() }()
 
 	socketFile := fmt.Sprintf("/proc/self/fd/%d/%s", socketFileDir.Fd(), filepath.Base(socketPath))
 
@@ -461,8 +463,8 @@ func DiskVMVirtiofsdStart(execPath string, inst instance.Instance, socketPath st
 		return nil, nil, fmt.Errorf("Failed to create unix listener for virtiofsd: %w", err)
 	}
 	revert.Add(func() {
-		listener.Close()
-		os.Remove(socketPath)
+		_ = listener.Close()
+		_ = os.Remove(socketPath)
 	})
 
 	unixListener, ok := listener.(*net.UnixListener)
@@ -474,7 +476,7 @@ func DiskVMVirtiofsdStart(execPath string, inst instance.Instance, socketPath st
 	if err != nil {
 		return nil, nil, fmt.Errorf("Failed to getting unix listener file for virtiofsd: %w", err)
 	}
-	defer unixFile.Close()
+	defer func() { _ = unixFile.Close() }()
 
 	// Start the virtiofsd process in non-daemon mode.
 	args := []string{"--fd=3", "-o", fmt.Sprintf("source=%s", sharePath)}
@@ -492,16 +494,16 @@ func DiskVMVirtiofsdStart(execPath string, inst instance.Instance, socketPath st
 		return nil, nil, fmt.Errorf("Failed to start virtiofsd: %w", err)
 	}
 
-	revert.Add(func() { proc.Stop() })
+	revert.Add(func() { _ = proc.Stop() })
 
 	err = proc.Save(pidPath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("Failed to save virtiofsd state: %w", err)
 	}
 
-	revertExternal := revert.Clone()
+	cleanup := revert.Clone().Fail
 	revert.Success()
-	return revertExternal.Fail, listener, err
+	return cleanup, listener, err
 }
 
 // DiskVMVirtiofsdStop stops an existing virtiofsd process and cleans up.
@@ -520,11 +522,17 @@ func DiskVMVirtiofsdStop(socketPath string, pidPath string) error {
 		}
 
 		// Remove PID file if needed.
-		os.Remove(pidPath)
+		err = os.Remove(pidPath)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("Failed to remove PID file: %w", err)
+		}
 	}
 
 	// Remove socket file if needed.
-	os.Remove(socketPath)
+	err := os.Remove(socketPath)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("Failed to remove socket file: %w", err)
+	}
 
 	return nil
 }

@@ -190,9 +190,7 @@ func (m *Mapping) FieldArgs(fields []*Field, extra ...string) string {
 		args = append(args, arg)
 	}
 
-	for _, arg := range extra {
-		args = append(args, arg)
-	}
+	args = append(args, extra...)
 
 	return strings.Join(args, ", ")
 }
@@ -292,24 +290,3 @@ const (
 	TypeSlice
 	TypeMap
 )
-
-// IsColumnType returns true if the given type name is one mapping directly to
-// a database column.
-func IsColumnType(name string) bool {
-	return shared.StringInSlice(name, columnarTypeNames)
-}
-
-var columnarTypeNames = []string{
-	"bool",
-	"instancetype.Type",
-	"int",
-	"int64",
-	"OperationType",
-	"CertificateType",
-	"DeviceType",
-	"string",
-	"time.Time",
-	"sql.NullTime",
-	"WarningType",
-	"WarningStatus",
-}

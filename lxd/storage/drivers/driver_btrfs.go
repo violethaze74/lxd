@@ -31,7 +31,8 @@ type btrfs struct {
 func (d *btrfs) load() error {
 	// Register the patches.
 	d.patches = map[string]func() error{
-		"storage_lvm_skipactivation": nil,
+		"storage_lvm_skipactivation":       nil,
+		"storage_missing_snapshot_records": nil,
 	}
 
 	// Done if previously loaded.
@@ -331,7 +332,7 @@ func (d *btrfs) Mount() (bool, error) {
 		if err != nil {
 			return false, err
 		}
-		defer loopF.Close()
+		defer func() { _ = loopF.Close() }()
 
 		mntSrc = loopF.Name()
 	} else if filepath.IsAbs(d.config["source"]) {
@@ -397,7 +398,7 @@ func (d *btrfs) Unmount() (bool, error) {
 	// If loop backed, force release the loop device.
 	loopPath := loopFilePath(d.name)
 	if d.config["source"] == loopPath {
-		releaseLoopDev(loopPath)
+		_ = releaseLoopDev(loopPath)
 	}
 
 	return ourUnmount, nil

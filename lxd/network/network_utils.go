@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/lxc/lxd/lxd/db"
+	"github.com/lxc/lxd/lxd/db/cluster"
 	deviceConfig "github.com/lxc/lxd/lxd/device/config"
 	"github.com/lxc/lxd/lxd/device/nictype"
 	"github.com/lxc/lxd/lxd/dnsmasq"
@@ -72,8 +73,8 @@ func MACDevName(mac net.HardwareAddr) string {
 }
 
 // usedByInstanceDevices looks for instance NIC devices using the network and runs the supplied usageFunc for each.
-func usedByInstanceDevices(s *state.State, networkProjectName string, networkName string, usageFunc func(inst db.Instance, nicName string, nicConfig map[string]string) error) error {
-	return s.DB.Cluster.InstanceList(nil, func(inst db.Instance, p api.Project, profiles []api.Profile) error {
+func usedByInstanceDevices(s *state.State, networkProjectName string, networkName string, usageFunc func(inst db.InstanceArgs, nicName string, nicConfig map[string]string) error) error {
+	return s.DB.Cluster.InstanceList(nil, func(inst db.InstanceArgs, p api.Project, profiles []api.Profile) error {
 		// Get the instance's effective network project name.
 		instNetworkProject := project.NetworkProjectFromRecord(&p)
 
@@ -83,7 +84,7 @@ func usedByInstanceDevices(s *state.State, networkProjectName string, networkNam
 		}
 
 		// Look for NIC devices using this network.
-		devices := db.ExpandInstanceDevices(deviceConfig.NewDevices(db.DevicesToAPI(inst.Devices)), profiles)
+		devices := db.ExpandInstanceDevices(inst.Devices.Clone(), profiles)
 		for devName, devConfig := range devices {
 			if isInUseByDevice(networkName, devConfig) {
 				err := usageFunc(inst, devName, devConfig)
@@ -155,11 +156,40 @@ func UsedBy(s *state.State, networkProjectName string, networkID int64, networkN
 	}
 
 	// Look for profiles. Next cheapest to do.
-	var profiles []db.Profile
 	err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
-		profiles, err = tx.GetProfiles(db.ProfileFilter{})
+		profiles, err := cluster.GetProfiles(ctx, tx.Tx(), cluster.ProfileFilter{})
 		if err != nil {
 			return err
+		}
+
+		for _, profile := range profiles {
+			profileDevices, err := cluster.GetProfileDevices(ctx, tx.Tx(), profile.ID)
+			if err != nil {
+				return err
+			}
+
+			profileProject, err := cluster.GetProject(ctx, tx.Tx(), profile.Project)
+			if err != nil {
+				return err
+			}
+
+			apiProfileProject, err := profileProject.ToAPI(ctx, tx.Tx())
+			if err != nil {
+				return err
+			}
+
+			inUse, err := usedByProfileDevices(s, profileDevices, apiProfileProject, networkProjectName, networkName)
+			if err != nil {
+				return err
+			}
+
+			if inUse {
+				usedBy = append(usedBy, api.NewURL().Path(version.APIVersion, "profiles", profile.Name).Project(profile.Project).String())
+
+				if firstOnly {
+					return nil
+				}
+			}
 		}
 
 		return nil
@@ -168,23 +198,8 @@ func UsedBy(s *state.State, networkProjectName string, networkID int64, networkN
 		return nil, err
 	}
 
-	for _, profile := range profiles {
-		inUse, err := usedByProfileDevices(s, profile, networkProjectName, networkName)
-		if err != nil {
-			return nil, err
-		}
-
-		if inUse {
-			usedBy = append(usedBy, api.NewURL().Path(version.APIVersion, "profiles", profile.Name).Project(profile.Project).String())
-
-			if firstOnly {
-				return usedBy, nil
-			}
-		}
-	}
-
 	// Check if any instance devices use this network.
-	err = usedByInstanceDevices(s, networkProjectName, networkName, func(inst db.Instance, nicName string, nicConfig map[string]string) error {
+	err = usedByInstanceDevices(s, networkProjectName, networkName, func(inst db.InstanceArgs, nicName string, nicConfig map[string]string) error {
 		usedBy = append(usedBy, api.NewURL().Path(version.APIVersion, "instances", inst.Name).Project(inst.Project).String())
 
 		if firstOnly {
@@ -207,20 +222,17 @@ func UsedBy(s *state.State, networkProjectName string, networkID int64, networkN
 
 // usedByProfileDevices indicates if network is referenced by a profile's NIC devices.
 // Checks if the device's parent or network properties match the network name.
-func usedByProfileDevices(s *state.State, profile db.Profile, networkProjectName string, networkName string) (bool, error) {
+func usedByProfileDevices(s *state.State, profileDevices map[string]cluster.Device, profileProject *api.Project, networkProjectName string, networkName string) (bool, error) {
 	// Get the translated network project name from the profiles's project.
-	profileNetworkProjectName, _, err := project.NetworkProject(s.DB.Cluster, profile.Project)
-	if err != nil {
-		return false, err
-	}
 
 	// Skip profiles who's translated network project doesn't match the requested network's project.
 	// Because its devices can't be using this network.
+	profileNetworkProjectName := project.NetworkProjectFromRecord(profileProject)
 	if networkProjectName != profileNetworkProjectName {
 		return false, nil
 	}
 
-	for _, d := range deviceConfig.NewDevices(db.DevicesToAPI(profile.Devices)) {
+	for _, d := range deviceConfig.NewDevices(cluster.DevicesToAPI(profileDevices)) {
 		if isInUseByDevice(networkName, d) {
 			return true, nil
 		}
@@ -268,7 +280,7 @@ func DefaultGatewaySubnetV4() (*net.IPNet, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	ifaceName := ""
 
@@ -412,7 +424,7 @@ func UpdateDNSMasqStatic(s *state.State, networkName string) error {
 
 	// Update the host files.
 	for _, network := range networks {
-		entries, _ := entries[network]
+		entries := entries[network]
 
 		// Skip networks we don't manage (or don't have DHCP enabled).
 		if !shared.PathExists(shared.VarPath("networks", network, "dnsmasq.pid")) {
@@ -507,7 +519,7 @@ func ForkdnsServersList(networkName string) ([]string, error) {
 	if err != nil {
 		return servers, err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
@@ -577,7 +589,7 @@ func inRoutingTable(subnet *net.IPNet) bool {
 	if err != nil {
 		return false
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	scanner := bufio.NewReader(file)
 	for {
@@ -651,12 +663,7 @@ func pingIP(ip net.IP) bool {
 	}
 
 	_, err := shared.RunCommand(cmd, "-n", "-q", ip.String(), "-c", "1", "-W", "1")
-	if err != nil {
-		// Remote didn't answer.
-		return false
-	}
-
-	return true
+	return err == nil
 }
 
 func pingSubnet(subnet *net.IPNet) bool {
@@ -739,7 +746,7 @@ func GetHostDevice(parent string, vlan string) string {
 	if err != nil {
 		return defaultVlan
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
@@ -825,7 +832,7 @@ func GetMACSlice(hwaddr string) []string {
 
 	if !strings.Contains(hwaddr, ":") {
 		if s, err := strconv.ParseUint(hwaddr, 10, 64); err == nil {
-			hwaddr = fmt.Sprintln(fmt.Sprintf("%x", s))
+			hwaddr = fmt.Sprintf("%x\n", s)
 			var tuple string
 			for i, r := range hwaddr {
 				tuple = tuple + string(r)
@@ -1039,7 +1046,7 @@ func VLANInterfaceCreate(parent string, vlanDevice string, vlanID string, gvrp b
 	}
 
 	// Attempt to disable IPv6 router advertisement acceptance.
-	util.SysctlSet(fmt.Sprintf("net/ipv6/conf/%s/accept_ra", vlanDevice), "0")
+	_ = util.SysctlSet(fmt.Sprintf("net/ipv6/conf/%s/accept_ra", vlanDevice), "0")
 
 	// We created a new vlan interface, return true.
 	return true, nil
@@ -1104,11 +1111,7 @@ func SubnetContainsIP(outerSubnet *net.IPNet, ip net.IP) bool {
 
 	ipSubnet.IP = ip
 
-	if SubnetContains(outerSubnet, ipSubnet) {
-		return true
-	}
-
-	return false
+	return SubnetContains(outerSubnet, ipSubnet)
 }
 
 // SubnetIterate iterates through each IP in a subnet calling a function for each IP.

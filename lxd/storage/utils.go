@@ -15,7 +15,6 @@ import (
 	"github.com/lxc/lxd/lxd/archive"
 	"github.com/lxc/lxd/lxd/db"
 	"github.com/lxc/lxd/lxd/db/cluster"
-	deviceConfig "github.com/lxc/lxd/lxd/device/config"
 	"github.com/lxc/lxd/lxd/instance"
 	"github.com/lxc/lxd/lxd/instance/instancetype"
 	"github.com/lxc/lxd/lxd/migration"
@@ -195,7 +194,7 @@ func VolumeDBGet(pool Pool, projectName string, volumeName string, volumeType dr
 	_, vol, err := p.state.DB.Cluster.GetLocalStoragePoolVolume(projectName, volumeName, volDBType, pool.ID())
 	if err != nil {
 		if response.IsNotFoundError(err) {
-			return vol, fmt.Errorf("Storage volume %q of type %q does not exist on pool %q: %w", fmt.Sprintf("%s_%s", projectName, volumeName), volumeType, pool.Name(), err)
+			return vol, fmt.Errorf("Storage volume %q in project %q of type %q does not exist on pool %q: %w", volumeName, projectName, volumeType, pool.Name(), err)
 		}
 
 		return nil, err
@@ -504,13 +503,13 @@ func ImageUnpack(imageFile string, vol drivers.Volume, destBlockFile string, blo
 		from, err := os.OpenFile(imgPath, unix.O_DIRECT|unix.O_RDONLY, 0)
 		if err == nil {
 			cmd = append(cmd, "-T", "none")
-			from.Close()
+			_ = from.Close()
 		}
 
 		to, err := os.OpenFile(dstPath, unix.O_DIRECT|unix.O_RDONLY, 0)
 		if err == nil {
 			cmd = append(cmd, "-t", "none")
-			to.Close()
+			_ = to.Close()
 		}
 
 		// Check if we should do parallel unpacking.
@@ -548,7 +547,7 @@ func ImageUnpack(imageFile string, vol drivers.Volume, destBlockFile string, blo
 		if err != nil {
 			return -1, err
 		}
-		defer os.RemoveAll(tempDir)
+		defer func() { _ = os.RemoveAll(tempDir) }()
 
 		// Unpack the whole image.
 		err = archive.Unpack(imageFile, tempDir, blockBackend, sysOS, tracker)
@@ -594,7 +593,7 @@ func InstanceContentType(inst instance.Instance) drivers.ContentType {
 // VolumeUsedByProfileDevices finds profiles using a volume and passes them to profileFunc for evaluation.
 // The profileFunc is provided with a profile config, project config and a list of device names that are using
 // the volume.
-func VolumeUsedByProfileDevices(s *state.State, poolName string, projectName string, vol *api.StorageVolume, profileFunc func(profile db.Profile, project cluster.Project, usedByDevices []string) error) error {
+func VolumeUsedByProfileDevices(s *state.State, poolName string, projectName string, vol *api.StorageVolume, profileFunc func(profileID int64, profile api.Profile, project cluster.Project, usedByDevices []string) error) error {
 	// Convert the volume type name to our internal integer representation.
 	volumeType, err := VolumeTypeNameToDBType(vol.Type)
 	if err != nil {
@@ -602,9 +601,9 @@ func VolumeUsedByProfileDevices(s *state.State, poolName string, projectName str
 	}
 
 	projectMap := map[string]cluster.Project{}
-	var dbProfiles []db.Profile
+	var profiles []api.Profile
+	var profileIDs []int64
 	var profileProjects []*api.Project
-
 	// Retrieve required info from the database in single transaction for performance.
 	err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
 		projects, err := cluster.GetProjects(ctx, tx.Tx(), cluster.ProjectFilter{})
@@ -617,9 +616,19 @@ func VolumeUsedByProfileDevices(s *state.State, poolName string, projectName str
 			projectMap[project.Name] = projects[i]
 		}
 
-		dbProfiles, err = tx.GetProfiles(db.ProfileFilter{})
+		dbProfiles, err := cluster.GetProfiles(ctx, tx.Tx(), cluster.ProfileFilter{})
 		if err != nil {
 			return fmt.Errorf("Failed loading profiles: %w", err)
+		}
+
+		for _, profile := range dbProfiles {
+			apiProfile, err := profile.ToAPI(ctx, tx.Tx())
+			if err != nil {
+				return fmt.Errorf("Failed getting API Profile %q: %w", profile.Name, err)
+			}
+
+			profileIDs = append(profileIDs, int64(profile.ID))
+			profiles = append(profiles, *apiProfile)
 		}
 
 		profileProjects = make([]*api.Project, len(dbProfiles))
@@ -639,7 +648,7 @@ func VolumeUsedByProfileDevices(s *state.State, poolName string, projectName str
 
 	// Iterate all profiles, consider only those which belong to a project that has the same effective
 	// storage project as volume.
-	for i, profile := range dbProfiles {
+	for i, profile := range profiles {
 		profileStorageProject := project.StorageVolumeProjectFromRecord(profileProjects[i], volumeType)
 		if err != nil {
 			return err
@@ -656,22 +665,22 @@ func VolumeUsedByProfileDevices(s *state.State, poolName string, projectName str
 
 		// Iterate through each of the profiles's devices, looking for disks in the same pool as volume.
 		// Then try and match the volume name against the profile device's "source" property.
-		for _, dev := range profile.Devices {
-			if dev.Type != db.TypeDisk {
+		for name, dev := range profile.Devices {
+			if dev["type"] != cluster.TypeDisk.String() {
 				continue
 			}
 
-			if dev.Config["pool"] != poolName {
+			if dev["pool"] != poolName {
 				continue
 			}
 
-			if dev.Config["source"] == vol.Name {
-				usedByDevices = append(usedByDevices, dev.Name)
+			if dev["source"] == vol.Name {
+				usedByDevices = append(usedByDevices, name)
 			}
 		}
 
 		if len(usedByDevices) > 0 {
-			err = profileFunc(profile, projectMap[profileProjects[i].Name], usedByDevices)
+			err = profileFunc(profileIDs[i], profile, projectMap[profileProjects[i].Name], usedByDevices)
 			if err != nil {
 				return err
 			}
@@ -686,14 +695,14 @@ func VolumeUsedByProfileDevices(s *state.State, poolName string, projectName str
 // is returned immediately. The instanceFunc is executed during a DB transaction, so DB queries are not permitted.
 // The instanceFunc is provided with a instance config, project config, instance's profiles and a list of device
 // names that are using the volume.
-func VolumeUsedByInstanceDevices(s *state.State, poolName string, projectName string, vol *api.StorageVolume, expandDevices bool, instanceFunc func(inst db.Instance, project api.Project, profiles []api.Profile, usedByDevices []string) error) error {
+func VolumeUsedByInstanceDevices(s *state.State, poolName string, projectName string, vol *api.StorageVolume, expandDevices bool, instanceFunc func(inst db.InstanceArgs, project api.Project, profiles []api.Profile, usedByDevices []string) error) error {
 	// Convert the volume type name to our internal integer representation.
 	volumeType, err := VolumeTypeNameToDBType(vol.Type)
 	if err != nil {
 		return err
 	}
 
-	return s.DB.Cluster.InstanceList(nil, func(inst db.Instance, p api.Project, profiles []api.Profile) error {
+	return s.DB.Cluster.InstanceList(nil, func(inst db.InstanceArgs, p api.Project, profiles []api.Profile) error {
 		// If the volume has a specific cluster member which is different than the instance then skip as
 		// instance cannot be using this volume.
 		if vol.Location != "" && inst.Node != vol.Location {
@@ -713,11 +722,11 @@ func VolumeUsedByInstanceDevices(s *state.State, poolName string, projectName st
 		}
 
 		// Use local devices for usage check by if expandDevices is false (but don't modify instance).
-		devices := db.DevicesToAPI(inst.Devices)
+		devices := inst.Devices
 
 		// Expand devices for usage check if expandDevices is true.
 		if expandDevices {
-			devices = db.ExpandInstanceDevices(deviceConfig.NewDevices(db.DevicesToAPI(inst.Devices)), profiles).CloneNative()
+			devices = db.ExpandInstanceDevices(devices.Clone(), profiles)
 		}
 
 		var usedByDevices []string
@@ -751,7 +760,7 @@ func VolumeUsedByInstanceDevices(s *state.State, poolName string, projectName st
 
 // VolumeUsedByExclusiveRemoteInstancesWithProfiles checks if custom volume is exclusively attached to a remote
 // instance. Returns the remote instance that has the volume exclusively attached. Returns nil if volume available.
-func VolumeUsedByExclusiveRemoteInstancesWithProfiles(s *state.State, poolName string, projectName string, vol *api.StorageVolume) (*db.Instance, error) {
+func VolumeUsedByExclusiveRemoteInstancesWithProfiles(s *state.State, poolName string, projectName string, vol *api.StorageVolume) (*db.InstanceArgs, error) {
 	pool, err := LoadByName(s, poolName)
 	if err != nil {
 		return nil, fmt.Errorf("Failed loading storage pool %q: %w", poolName, err)
@@ -779,8 +788,8 @@ func VolumeUsedByExclusiveRemoteInstancesWithProfiles(s *state.State, poolName s
 	}
 
 	// Find if volume is attached to a remote instance.
-	var remoteInstance *db.Instance
-	err = VolumeUsedByInstanceDevices(s, poolName, projectName, vol, true, func(dbInst db.Instance, project api.Project, profiles []api.Profile, usedByDevices []string) error {
+	var remoteInstance *db.InstanceArgs
+	err = VolumeUsedByInstanceDevices(s, poolName, projectName, vol, true, func(dbInst db.InstanceArgs, project api.Project, profiles []api.Profile, usedByDevices []string) error {
 		if dbInst.Node != localNode {
 			remoteInstance = &dbInst
 			return db.ErrInstanceListStop // Stop the search, this volume is attached to a remote instance.
@@ -893,7 +902,7 @@ func InstanceDiskBlockSize(pool Pool, inst instance.Instance, op *operations.Ope
 	if err != nil {
 		return -1, err
 	}
-	defer InstanceUnmount(pool, inst, op)
+	defer func() { _ = InstanceUnmount(pool, inst, op) }()
 
 	if mountInfo.DiskPath == "" {
 		return -1, fmt.Errorf("No disk path available from mount")
@@ -905,60 +914,4 @@ func InstanceDiskBlockSize(pool Pool, inst instance.Instance, op *operations.Ope
 	}
 
 	return blockDiskSize, nil
-}
-
-func syncSnapshotsVolumeGet(srcSnapshots []db.StorageVolumeArgs, destSnapshots []db.StorageVolumeArgs) ([]db.StorageVolumeArgs, []db.StorageVolumeArgs) {
-	// There is currently no recorded creation timestamp, so we can only detect changes based on name.
-
-	// Maps to track based on snapshot name (instead of vol/snapshot).
-	srcSnapshotNames := map[string]db.StorageVolumeArgs{}
-	destSnapshotNames := map[string]db.StorageVolumeArgs{}
-
-	// Fill in the source snapshots.
-	for _, snapshot := range srcSnapshots {
-		// Strip the volume name.
-		_, snapshotName, _ := shared.InstanceGetParentAndSnapshotName(snapshot.Name)
-
-		srcSnapshotNames[snapshotName] = snapshot
-	}
-
-	// Fill in the destination snapshots.
-	for _, snapshot := range destSnapshots {
-		// Strip the volume name.
-		_, snapshotName, _ := shared.InstanceGetParentAndSnapshotName(snapshot.Name)
-
-		destSnapshotNames[snapshotName] = snapshot
-	}
-
-	// Result slices.
-	syncSnapshots := []db.StorageVolumeArgs{}
-	deleteSnapshots := []db.StorageVolumeArgs{}
-
-	// Find destination snapshots to delete.
-	for _, snapshot := range destSnapshots {
-		_, snapshotName, _ := shared.InstanceGetParentAndSnapshotName(snapshot.Name)
-
-		_, exists := srcSnapshotNames[snapshotName]
-		if exists {
-			continue
-		}
-
-		// Doesn't exist on source anymore, delete it.
-		deleteSnapshots = append(deleteSnapshots, snapshot)
-	}
-
-	// Find source snapshots to sync.
-	for _, snapshot := range srcSnapshots {
-		_, snapshotName, _ := shared.InstanceGetParentAndSnapshotName(snapshot.Name)
-
-		_, exists := destSnapshotNames[snapshotName]
-		if exists {
-			continue
-		}
-
-		// Doesn't exist on the target, sync it.
-		syncSnapshots = append(syncSnapshots, snapshot)
-	}
-
-	return syncSnapshots, deleteSnapshots
 }

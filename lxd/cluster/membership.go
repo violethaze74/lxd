@@ -217,9 +217,6 @@ func EnsureServerCertificateTrusted(serverName string, serverCert *shared.CertIn
 // Return an updated list raft database nodes (possibly including the newly
 // accepted node).
 func Accept(state *state.State, gateway *Gateway, name, address string, schema, api, arch int) ([]db.RaftNode, error) {
-	var maxVoters int64
-	var maxStandBy int64
-
 	// Check parameters
 	if name == "" {
 		return nil, fmt.Errorf("Member name must not be empty")
@@ -232,15 +229,8 @@ func Accept(state *state.State, gateway *Gateway, name, address string, schema, 
 	// Insert the new node into the nodes table.
 	var id int64
 	err := state.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
-		config, err := ConfigLoad(tx)
-		if err != nil {
-			return fmt.Errorf("Load cluster configuration: %w", err)
-		}
-		maxVoters = config.MaxVoters()
-		maxStandBy = config.MaxStandBy()
-
 		// Check that the node can be accepted with these parameters.
-		err = membershipCheckClusterStateForAccept(tx, name, address, schema, api)
+		err := membershipCheckClusterStateForAccept(tx, name, address, schema, api)
 		if err != nil {
 			return err
 		}
@@ -292,9 +282,9 @@ func Accept(state *state.State, gateway *Gateway, name, address string, schema, 
 		Name: name,
 	}
 
-	if count > 1 && voters < int(maxVoters) {
+	if count > 1 && voters < int(state.GlobalConfig.MaxVoters()) {
 		node.Role = db.RaftVoter
-	} else if standbys < int(maxStandBy) {
+	} else if standbys < int(state.GlobalConfig.MaxStandBy()) {
 		node.Role = db.RaftStandBy
 	}
 	nodes = append(nodes, node)
@@ -350,7 +340,7 @@ func Join(state *state.State, gateway *Gateway, networkCert *shared.CertInfo, se
 	// /cluster/nodes request which triggered this code.
 	var pools map[string]map[string]string
 	var networks map[string]map[string]string
-	var operations []db.Operation
+	var operations []cluster.Operation
 
 	err = state.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
 		pools, err = tx.GetStoragePoolsLocalConfig()
@@ -364,8 +354,8 @@ func Join(state *state.State, gateway *Gateway, networkCert *shared.CertInfo, se
 		}
 
 		nodeID := tx.GetNodeID()
-		filter := db.OperationFilter{NodeID: &nodeID}
-		operations, err = tx.GetOperations(filter)
+		filter := cluster.OperationFilter{NodeID: &nodeID}
+		operations, err = cluster.GetOperations(ctx, tx.Tx(), filter)
 		if err != nil {
 			return err
 		}
@@ -428,7 +418,7 @@ func Join(state *state.State, gateway *Gateway, networkCert *shared.CertInfo, se
 	if err != nil {
 		return fmt.Errorf("Failed to connect to cluster leader: %w", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	logger.Info("Adding node to cluster", logger.Ctx{"id": info.ID, "local": info.Address, "role": info.Role})
 	ctx, cancel = context.WithTimeout(context.Background(), time.Minute)
@@ -519,13 +509,13 @@ func Join(state *state.State, gateway *Gateway, networkCert *shared.CertInfo, se
 
 		// Migrate outstanding operations.
 		for _, operation := range operations {
-			op := db.Operation{
+			op := cluster.Operation{
 				UUID:   operation.UUID,
 				Type:   operation.Type,
 				NodeID: tx.GetNodeID(),
 			}
 
-			_, err := tx.CreateOrReplaceOperation(op)
+			_, err := cluster.CreateOrReplaceOperation(ctx, tx.Tx(), op)
 			if err != nil {
 				return fmt.Errorf("Failed to migrate operation %s: %w", operation.UUID, err)
 			}
@@ -633,7 +623,7 @@ func NotifyHeartbeat(state *state.State, gateway *Gateway) {
 
 		wg.Add(1)
 		go func(address string) {
-			HeartbeatNode(context.Background(), address, state.Endpoints.NetworkCert(), state.ServerCert(), hbState)
+			_ = HeartbeatNode(context.Background(), address, state.Endpoints.NetworkCert(), state.ServerCert(), hbState)
 			wg.Done()
 		}(node.Address)
 	}
@@ -787,7 +777,7 @@ assign:
 	if err != nil {
 		return fmt.Errorf("Connect to cluster leader: %w", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	// Figure out our current role.
 	role := db.RaftRole(-1)
@@ -939,7 +929,7 @@ func Leave(state *state.State, gateway *Gateway, name string, force bool) (strin
 	if err != nil {
 		return "", fmt.Errorf("Failed to connect to cluster leader: %w", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 	err = client.Remove(ctx, info.ID)
 	if err != nil {
 		return "", fmt.Errorf("Failed to leave the cluster: %w", err)
@@ -993,17 +983,9 @@ func Handover(state *state.State, gateway *Gateway, address string) (string, []d
 
 // Build an app.RolesChanges object feeded with the current cluster state.
 func newRolesChanges(state *state.State, gateway *Gateway, nodes []db.RaftNode, unavailableMembers []string) (*app.RolesChanges, error) {
-	var maxVoters int
-	var maxStandBy int
 	var domains map[string]uint64
-
 	err := state.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
-		config, err := ConfigLoad(tx)
-		if err != nil {
-			return fmt.Errorf("Load cluster configuration: %w", err)
-		}
-		maxVoters = int(config.MaxVoters())
-		maxStandBy = int(config.MaxStandBy())
+		var err error
 
 		domains, err = tx.GetNodesFailureDomains()
 		if err != nil {
@@ -1030,8 +1012,8 @@ func newRolesChanges(state *state.State, gateway *Gateway, nodes []db.RaftNode, 
 
 	roles := &app.RolesChanges{
 		Config: app.RolesConfig{
-			Voters:   maxVoters,
-			StandBys: maxStandBy,
+			Voters:   int(state.GlobalConfig.MaxVoters()),
+			StandBys: int(state.GlobalConfig.MaxStandBy()),
 		},
 		State: cluster,
 	}

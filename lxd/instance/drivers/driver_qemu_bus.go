@@ -2,7 +2,6 @@ package drivers
 
 import (
 	"fmt"
-	"strings"
 )
 
 const busFunctionGroupNone = ""           // Add a non multi-function port.
@@ -19,8 +18,8 @@ type qemuBusEntry struct {
 }
 
 type qemuBus struct {
-	name string           // Bus type.
-	sb   *strings.Builder // String builder to use.
+	name string        // Bus type.
+	cfg  *[]cfgSection // pointer to cfgSection slice.
 
 	portNum int // Next available port/chassis on the bridge.
 	devNum  int // Next available device number on the bridge.
@@ -118,14 +117,14 @@ func (a *qemuBus) allocate(multiFunctionGroup string) (string, string, bool) {
 	if a.name == "pcie" {
 		if p.fn == 0 {
 			portName := fmt.Sprintf("%s%d", busDevicePortPrefix, a.portNum)
-			qemuPCIe.Execute(a.sb, map[string]any{
-				"portName": portName,
-				"index":    a.portNum,
-				"addr":     fmt.Sprintf("%x.%d", p.bridgeDev, p.bridgeFn),
-
+			pcieOpts := qemuPCIeOpts{
+				portName: portName,
+				index:    a.portNum,
+				devAddr:  fmt.Sprintf("%x.%d", p.bridgeDev, p.bridgeFn),
 				// First root port added on a bridge bus address needs multi-function enabled.
-				"multifunction": p.bridgeFn == 0,
-			})
+				multifunction: p.bridgeFn == 0,
+			}
+			*a.cfg = append(*a.cfg, qemuPCIe(&pcieOpts)...)
 			p.dev = portName
 			a.portNum++
 		}
@@ -138,10 +137,10 @@ func (a *qemuBus) allocate(multiFunctionGroup string) (string, string, bool) {
 
 // qemuNewBus instantiates a new qemu bus allocator. Accepts the type name of the bus and the qemu config builder
 // which it will use to write root port config entries too as ports are allocated.
-func qemuNewBus(name string, sb *strings.Builder) *qemuBus {
+func qemuNewBus(name string, cfg *[]cfgSection) *qemuBus {
 	a := &qemuBus{
 		name: name,
-		sb:   sb,
+		cfg:  cfg,
 
 		portNum: 0, // No PCIe ports are used in the default config.
 		devNum:  1, // Address 0 is used by the DRAM controller.

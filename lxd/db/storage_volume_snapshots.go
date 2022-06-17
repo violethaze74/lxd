@@ -166,7 +166,7 @@ func (c *Cluster) GetExpiredStorageVolumeSnapshots() ([]StorageVolumeArgs, error
 	JOIN storage_volumes ON storage_volumes_snapshots.storage_volume_id = storage_volumes.id
 	JOIN storage_pools ON storage_volumes.storage_pool_id = storage_pools.id
 	JOIN projects ON storage_volumes.project_id = projects.id
-	WHERE storage_volumes.type = ?`
+	WHERE storage_volumes.type = ? AND storage_volumes_snapshots.expiry_date != '0001-01-01T00:00:00Z'`
 
 	var snapshots []StorageVolumeArgs
 
@@ -208,7 +208,7 @@ func (c *Cluster) GetExpiredStorageVolumeSnapshots() ([]StorageVolumeArgs, error
 
 // Updates the expiry date of a storage volume snapshot.
 func storageVolumeSnapshotExpiryDateUpdate(tx *sql.Tx, volumeID int64, expiryDate time.Time) error {
-	stmt := fmt.Sprintf("UPDATE storage_volumes_snapshots SET expiry_date=? WHERE id=?")
+	stmt := "UPDATE storage_volumes_snapshots SET expiry_date=? WHERE id=?"
 	_, err := tx.Exec(stmt, expiryDate, volumeID)
 	return err
 }

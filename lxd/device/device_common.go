@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"net"
 
-	"github.com/lxc/lxd/lxd/cluster"
+	clusterConfig "github.com/lxc/lxd/lxd/cluster/config"
 	deviceConfig "github.com/lxc/lxd/lxd/device/config"
 	"github.com/lxc/lxd/lxd/instance"
 	"github.com/lxc/lxd/lxd/instance/instancetype"
@@ -68,11 +68,7 @@ func (d *deviceCommon) Register() error {
 // Returns true if instance type is container, as majority of devices can be started/stopped when
 // instance is running. If instance type is VM then returns false as this is not currently supported.
 func (d *deviceCommon) CanHotPlug() bool {
-	if d.inst.Type() == instancetype.Container {
-		return true
-	}
-
-	return false
+	return d.inst.Type() == instancetype.Container
 }
 
 // CanMigrate returns whether the device can be migrated to any other cluster member.
@@ -106,7 +102,7 @@ func (d *deviceCommon) Remove() error {
 // Accepts optional hwaddr MAC address to use for generating the interface name in mac mode.
 // In mac mode the interface prefix is always "lxd".
 func (d *deviceCommon) generateHostName(prefix string, hwaddr string) (string, error) {
-	hostNameMode, err := cluster.ConfigGetString(d.state.DB.Cluster, "instances.nic.host_name")
+	hostNameMode, err := clusterConfig.GetString(d.state.DB.Cluster, "instances.nic.host_name")
 	if err != nil {
 		return "", fmt.Errorf(`Failed getting "instances.nic.host_name" config: %w`, err)
 	}

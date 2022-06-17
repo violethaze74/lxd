@@ -52,7 +52,8 @@ type migrationFields struct {
 	instance     instance.Instance
 
 	// storage specific fields
-	volumeOnly bool
+	volumeOnly        bool
+	allowInconsistent bool
 }
 
 func (c *migrationFields) send(m proto.Message) error {
@@ -87,8 +88,8 @@ func (c *migrationFields) disconnect() {
 
 	c.controlLock.Lock()
 	if c.controlConn != nil {
-		c.controlConn.WriteMessage(websocket.CloseMessage, closeMsg)
-		c.controlConn.Close()
+		_ = c.controlConn.WriteMessage(websocket.CloseMessage, closeMsg)
+		_ = c.controlConn.Close()
 		c.controlConn = nil /* don't close twice */
 	}
 	c.controlLock.Unlock()
@@ -102,11 +103,11 @@ func (c *migrationFields) disconnect() {
 	 * anyway.
 	 */
 	if c.fsConn != nil {
-		c.fsConn.Close()
+		_ = c.fsConn.Close()
 	}
 
 	if c.criuConn != nil {
-		c.criuConn.Close()
+		_ = c.criuConn.Close()
 	}
 }
 

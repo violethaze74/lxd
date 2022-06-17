@@ -352,10 +352,12 @@ func Init() {
 		cgLayout = CgroupsDisabled
 		return
 	}
-	defer selfCg.Close()
+	defer func() { _ = selfCg.Close() }()
 
 	hasV1 := false
 	hasV2 := false
+	hasV2Root := false
+
 	// Go through the file line by line.
 	scanSelfCg := bufio.NewScanner(selfCg)
 	for scanSelfCg.Scan() {
@@ -410,6 +412,7 @@ func Init() {
 
 			if dedicatedPath != "" {
 				cgControllers = unifiedControllers
+				hasV2Root = true
 				break
 			} else {
 				for k, v := range unifiedControllers {
@@ -417,7 +420,13 @@ func Init() {
 				}
 			}
 		}
-		controllers.Close()
+		_ = controllers.Close()
+	}
+
+	// Discard weird setups that apply CGroupV1 trees on top of a CGroupV2 root.
+	if hasV2Root && hasV1 {
+		logger.Warn("Unsupported CGroup setup detected, V1 controllers on top of V2 root")
+		hasV1 = false
 	}
 
 	// Check for additional legacy cgroup features

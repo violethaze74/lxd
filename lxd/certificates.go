@@ -18,9 +18,11 @@ import (
 
 	"github.com/lxc/lxd/client"
 	"github.com/lxc/lxd/lxd/cluster"
+	clusterConfig "github.com/lxc/lxd/lxd/cluster/config"
 	clusterRequest "github.com/lxc/lxd/lxd/cluster/request"
 	"github.com/lxc/lxd/lxd/db"
 	dbCluster "github.com/lxc/lxd/lxd/db/cluster"
+	"github.com/lxc/lxd/lxd/db/operationtype"
 	"github.com/lxc/lxd/lxd/lifecycle"
 	"github.com/lxc/lxd/lxd/node"
 	"github.com/lxc/lxd/lxd/operations"
@@ -336,7 +338,7 @@ func clusterMemberJoinTokenDecode(input string) (*api.ClusterMemberJoinToken, er
 // clusterMemberJoinTokenValid searches for cluster join token that matches the join token provided.
 // Returns matching operation if found and cancels the operation, otherwise returns nil.
 func clusterMemberJoinTokenValid(d *Daemon, r *http.Request, projectName string, joinToken *api.ClusterMemberJoinToken) (*api.Operation, error) {
-	ops, err := operationsGetByType(d, r, projectName, db.OperationClusterJoinToken)
+	ops, err := operationsGetByType(d, r, projectName, operationtype.ClusterJoinToken)
 	if err != nil {
 		return nil, fmt.Errorf("Failed getting cluster join token operations: %w", err)
 	}
@@ -384,7 +386,7 @@ func clusterMemberJoinTokenValid(d *Daemon, r *http.Request, projectName string,
 // certificateTokenValid searches for certificate token that matches the add token provided.
 // Returns matching operation if found and cancels the operation, otherwise returns nil.
 func certificateTokenValid(d *Daemon, r *http.Request, addToken *api.CertificateAddToken) (*api.Operation, error) {
-	ops, err := operationsGetByType(d, r, project.Default, db.OperationCertificateAddToken)
+	ops, err := operationsGetByType(d, r, project.Default, operationtype.CertificateAddToken)
 	if err != nil {
 		return nil, fmt.Errorf("Failed getting certificate token operations: %w", err)
 	}
@@ -497,12 +499,23 @@ func certificatesPost(d *Daemon, r *http.Request) response.Response {
 		return response.BadRequest(fmt.Errorf("Can't use certificate if token is requested"))
 	}
 
-	if req.Token && req.Type != "client" {
-		return response.BadRequest(fmt.Errorf("Tokens can only be issued for client certificates"))
+	if req.Token {
+		if req.Type != "client" {
+			return response.BadRequest(fmt.Errorf("Tokens can only be issued for client certificates"))
+		}
+
+		address, err := node.HTTPSAddress(d.db.Node)
+		if err != nil {
+			return response.InternalError(fmt.Errorf("Failed to fetch node address: %w", err))
+		}
+
+		if address == "" {
+			return response.BadRequest(fmt.Errorf("Can't issue token when server isn't listening on network"))
+		}
 	}
 
 	// Access check.
-	secret, err := cluster.ConfigGetString(d.db.Cluster, "core.trust_password")
+	secret, err := clusterConfig.GetString(d.db.Cluster, "core.trust_password")
 	if err != nil {
 		return response.SmartError(err)
 	}
@@ -638,7 +651,7 @@ func certificatesPost(d *Daemon, r *http.Request) response.Response {
 			"request":     req,
 		}
 
-		op, err := operations.OperationCreate(d.State(), project.Default, operations.OperationClassToken, db.OperationCertificateAddToken, nil, meta, nil, nil, nil, r)
+		op, err := operations.OperationCreate(d.State(), project.Default, operations.OperationClassToken, operationtype.CertificateAddToken, nil, meta, nil, nil, nil, r)
 		if err != nil {
 			return response.InternalError(err)
 		}

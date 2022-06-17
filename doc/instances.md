@@ -87,6 +87,7 @@ raw.apparmor                                    | blob      | -                 
 raw.idmap                                       | blob      | -                 | no            | unprivileged container    | Raw idmap configuration (e.g. "both 1000 1000")
 raw.lxc                                         | blob      | -                 | no            | container                 | Raw LXC configuration to be appended to the generated one
 raw.qemu                                        | blob      | -                 | no            | virtual-machine           | Raw Qemu configuration to be appended to the generated command line
+raw.qemu.conf                                   | blob      | -                 | no            | virtual-machine           | Addition/override to the generated qemu.conf file
 raw.seccomp                                     | blob      | -                 | no            | container                 | Raw Seccomp configuration
 security.devlxd                                 | boolean   | true              | no            | -                         | Controls the presence of /dev/lxd in the instance
 security.devlxd.images                          | boolean   | false             | no            | container                 | Controls the availability of the /1.0/images API over devlxd
@@ -232,6 +233,7 @@ guest scheduler can properly reason about sockets, cores and threads as
 well as consider NUMA topology when sharing memory or moving processes
 across NUMA nodes.
 
+(devices)=
 ## Devices configuration
 LXD will always provide the instance with the basic devices which are required
 for a standard POSIX system to work. These aren't visible in instance or
@@ -762,12 +764,12 @@ if the source is a block device, a regular mount.
 
 LXD supports the following additional source types:
 
-- Ceph-rbd: Mount from existing ceph RBD device that is externally managed. LXD can use ceph to manage an internal file system for the instance, but in the event that a user has a previously existing ceph RBD that they would like use for this instance, they can use this command.
+- Ceph-rbd: Mount from existing Ceph RBD device that is externally managed. LXD can use Ceph to manage an internal file system for the instance, but in the event that a user has a previously existing Ceph RBD that they would like use for this instance, they can use this command.
 Example command
 ```
 lxc config device add <instance> ceph-rbd1 disk source=ceph:<my_pool>/<my-volume> ceph.user_name=<username> ceph.cluster_name=<username> path=/ceph
 ```
-- Ceph-fs: Mount from existing ceph FS device that is externally managed. LXD can use ceph to manage an internal file system for the instance, but in the event that a user has a previously existing ceph file sys that they would like use for this instancer, they can use this command.
+- Ceph-fs: Mount from existing CephFS device that is externally managed. LXD can use Ceph to manage an internal file system for the instance, but in the event that a user has a previously existing Ceph file sys that they would like use for this instancer, they can use this command.
 Example command.
 ```
 lxc config device add <instance> ceph-fs1 disk source=cephfs:<my-fs>/<some-path> ceph.user_name=<username> ceph.cluster_name=<username> path=/cephfs
@@ -799,8 +801,8 @@ pool                | string    | -         | no        | The storage pool the d
 propagation         | string    | -         | no        | Controls how a bind-mount is shared between the instance and the host. (Can be one of `private`, the default, or `shared`, `slave`, `unbindable`,  `rshared`, `rslave`, `runbindable`,  `rprivate`. Please see the Linux Kernel [shared subtree](https://www.kernel.org/doc/Documentation/filesystems/sharedsubtree.txt) documentation for a full explanation) <!-- wokeignore:rule=slave -->
 shift               | boolean   | false     | no        | Setup a shifting overlay to translate the source uid/gid to match the instance (only for containers)
 raw.mount.options   | string    | -         | no        | Filesystem specific mount options
-ceph.user\_name     | string    | admin     | no        | If source is ceph or cephfs then ceph user\_name must be specified by user for proper mount
-ceph.cluster\_name  | string    | ceph      | no        | If source is ceph or cephfs then ceph cluster\_name must be specified by user for proper mount
+ceph.user\_name     | string    | admin     | no        | If source is Ceph or CephFS then Ceph user\_name must be specified by user for proper mount
+ceph.cluster\_name  | string    | ceph      | no        | If source is Ceph or CephFS then Ceph cluster\_name must be specified by user for proper mount
 boot.priority       | integer   | -         | no        | Boot priority for VMs (higher boots first)
 
 #### Type: unix-char
@@ -1205,3 +1207,89 @@ Example of using pongo2 syntax to format snapshot names with timestamps:
 lxc config set INSTANCE snapshots.pattern "{{ creation_date|date:'2006-01-02_15-04-05' }}"
 ```
 This results in snapshots named `{date/time of creation}` down to the precision of a second.
+
+### Overriding qemu configuration
+For VM instances, LXD configures qemu via a somewhat undocumented configuration
+file format passed to qemu with the `-readconfig` command-line option, with
+each instance having a configuration file generated before boot. The generated
+configuration file can be found at `/var/log/lxd/[instance-name]/qemu.conf`.
+
+The default configuration works fine for LXD most common use case: Modern UEFI
+guests with virtio devices. In some situations however, it can be desirable to
+override the generated configuration:
+
+- Running an old guest OS that doesn't support UEFI.
+- Specify custom virtual devices when virtio is not supported by the guest OS .
+- Add devices not supported by LXD before the machines boots.
+- Remove devices that conflict with the guest OS.
+
+This level of customization can be achieved through the `raw.qemu.conf` config
+option, which supports a format similar to `qemu.conf` with some additions.
+Here's how to override the default "virtio-gpu-pci" GPU driver:
+
+```
+raw.qemu.conf: |-
+    [device "qemu_gpu"]
+    driver = "qxl-vga"
+```
+
+The above would replace the corresponding section/key in the generated config
+file. Since `raw.qemu.conf` is a multi-line config option, multiple
+sections/keys can be modified.
+
+It is also possible to entirely remove sections/keys by specifying a section
+without any keys:
+
+```
+raw.qemu.conf: |-
+    [device "qemu_gpu"]
+```
+
+To remove a key, specify an empty string as the value:
+
+```
+raw.qemu.conf: |-
+    [device "qemu_gpu"]
+    driver = ""
+```
+
+The configuration file format used by qemu allows multiple sections with the
+same name. Here's a piece of the config generated by LXD:
+
+```
+[global]
+driver = "ICH9-LPC"
+property = "disable_s3"
+value = "1"
+
+[global]
+driver = "ICH9-LPC"
+property = "disable_s4"
+value = "1"
+```
+
+To specify which section will be overridden, an index can be specified like this:
+
+```
+raw.qemu.conf: |-
+    [global][1]
+    value = "0"
+```
+
+Section indexes start at 0 (which is the default value when not specified), so
+the `raw.qemu.conf` above example would generate this:
+
+```
+[global]
+driver = "ICH9-LPC"
+property = "disable_s3"
+value = "1"
+
+[global]
+driver = "ICH9-LPC"
+property = "disable_s4"
+value = "0"
+```
+
+To add new sections, simply specify section names that are not present in the
+config file.

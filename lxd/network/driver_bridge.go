@@ -25,7 +25,6 @@ import (
 	"github.com/lxc/lxd/lxd/daemon"
 	"github.com/lxc/lxd/lxd/db"
 	dbCluster "github.com/lxc/lxd/lxd/db/cluster"
-	deviceConfig "github.com/lxc/lxd/lxd/device/config"
 	"github.com/lxc/lxd/lxd/device/nictype"
 	"github.com/lxc/lxd/lxd/dnsmasq"
 	"github.com/lxc/lxd/lxd/dnsmasq/dhcpalloc"
@@ -610,7 +609,7 @@ func (n *bridge) setup(oldConfig map[string]string) error {
 			if err != nil {
 				return err
 			}
-			revert.Add(func() { ovs.BridgeDelete(n.name) })
+			revert.Add(func() { _ = ovs.BridgeDelete(n.name) })
 		} else {
 
 			bridge := &ip.Bridge{
@@ -620,7 +619,7 @@ func (n *bridge) setup(oldConfig map[string]string) error {
 			if err != nil {
 				return err
 			}
-			revert.Add(func() { bridge.Delete() })
+			revert.Add(func() { _ = bridge.Delete() })
 		}
 	}
 
@@ -633,7 +632,12 @@ func (n *bridge) setup(oldConfig map[string]string) error {
 			return fmt.Errorf("Network has ipv6.address but kernel IPv6 support is missing")
 		}
 
-		err := util.SysctlSet(fmt.Sprintf("net/ipv6/conf/%s/autoconf", n.name), "0")
+		err := util.SysctlSet(fmt.Sprintf("net/ipv6/conf/%s/disable_ipv6", n.name), "0")
+		if err != nil {
+			return err
+		}
+
+		err = util.SysctlSet(fmt.Sprintf("net/ipv6/conf/%s/autoconf", n.name), "0")
 		if err != nil {
 			return err
 		}
@@ -641,6 +645,16 @@ func (n *bridge) setup(oldConfig map[string]string) error {
 		err = util.SysctlSet(fmt.Sprintf("net/ipv6/conf/%s/accept_dad", n.name), "0")
 		if err != nil {
 			return err
+		}
+	} else {
+		// Disable IPv6 if no address is specified. This prevents the
+		// host being reachable over a guessable link-local address as well as it
+		// auto-configuring an address should an instance operate an IPv6 router.
+		if shared.PathExists("/proc/sys/net/ipv6") {
+			err := util.SysctlSet(fmt.Sprintf("net/ipv6/conf/%s/disable_ipv6", n.name), "1")
+			if err != nil {
+				return err
+			}
 		}
 	}
 
@@ -682,10 +696,10 @@ func (n *bridge) setup(oldConfig map[string]string) error {
 		}
 		err = dummy.Add()
 		if err == nil {
-			revert.Add(func() { dummy.Delete() })
+			revert.Add(func() { _ = dummy.Delete() })
 			err = dummy.SetUp()
 			if err == nil {
-				AttachInterface(n.name, fmt.Sprintf("%s-mtu", n.name))
+				_ = AttachInterface(n.name, fmt.Sprintf("%s-mtu", n.name))
 			}
 		}
 	}
@@ -1288,7 +1302,7 @@ func (n *bridge) setup(oldConfig map[string]string) error {
 			}
 
 			// Fails if the map is already set.
-			tunLink.Change("ipip", fmt.Sprintf("%s:%s", overlay, underlay))
+			_ = tunLink.Change("ipip", fmt.Sprintf("%s:%s", overlay, underlay))
 
 			r = &ip.Route{
 				DevName: "tunl0",
@@ -1614,7 +1628,7 @@ func (n *bridge) setup(oldConfig map[string]string) error {
 			if err != nil {
 				return err
 			}
-			f.Close()
+			_ = f.Close()
 
 			err = n.spawnForkDNS(dnsClusteredAddress)
 			if err != nil {
@@ -1798,10 +1812,10 @@ func (n *bridge) Update(newNetwork api.NetworkPut, targetNode string, clientType
 		// Define a function which reverts everything.
 		revert.Add(func() {
 			// Reset changes to all nodes and database.
-			n.common.update(oldNetwork, targetNode, clientType)
+			_ = n.common.update(oldNetwork, targetNode, clientType)
 
 			// Reset any change that was made to local bridge.
-			n.setup(newNetwork.Config)
+			_ = n.setup(newNetwork.Config)
 		})
 
 		// Bring the bridge down entirely if the driver has changed.
@@ -2164,7 +2178,7 @@ func (n *bridge) updateForkdnsServersFile(addresses []string) error {
 	if err != nil {
 		return err
 	}
-	defer tmpFile.Close()
+	defer func() { _ = tmpFile.Close() }()
 
 	for _, address := range addresses {
 		_, err := tmpFile.WriteString(address + "\n")
@@ -2173,7 +2187,10 @@ func (n *bridge) updateForkdnsServersFile(addresses []string) error {
 		}
 	}
 
-	tmpFile.Close()
+	err = tmpFile.Close()
+	if err != nil {
+		return err
+	}
 
 	// Atomically rename finished file into permanent location so forkdns can pick it up.
 	err = os.Rename(tmpName, permName)
@@ -2401,7 +2418,7 @@ func (n *bridge) bridgeNetworkExternalSubnets(bridgeProjectNetworks map[string][
 func (n *bridge) bridgedNICExternalRoutes(bridgeProjectNetworks map[string][]*api.Network) ([]externalSubnetUsage, error) {
 	externalRoutes := make([]externalSubnetUsage, 0)
 
-	err := n.state.DB.Cluster.InstanceList(nil, func(inst db.Instance, p api.Project, profiles []api.Profile) error {
+	err := n.state.DB.Cluster.InstanceList(nil, func(inst db.InstanceArgs, p api.Project, profiles []api.Profile) error {
 		// Get the instance's effective network project name.
 		instNetworkProject := project.NetworkProjectFromRecord(&p)
 
@@ -2409,7 +2426,7 @@ func (n *bridge) bridgedNICExternalRoutes(bridgeProjectNetworks map[string][]*ap
 			return nil // Managed bridge networks can only exist in default project.
 		}
 
-		devices := db.ExpandInstanceDevices(deviceConfig.NewDevices(db.DevicesToAPI(inst.Devices)), profiles)
+		devices := db.ExpandInstanceDevices(inst.Devices, profiles)
 
 		// Iterate through each of the instance's devices, looking for bridged NICs that are linked to
 		// networks specified.
@@ -2579,9 +2596,9 @@ func (n *bridge) ForwardCreate(forward api.NetworkForwardsPost, clientType reque
 	}
 
 	revert.Add(func() {
-		n.state.DB.Cluster.DeleteNetworkForward(n.ID(), forwardID)
-		n.forwardSetupFirewall()
-		n.forwardBGPSetupPrefixes()
+		_ = n.state.DB.Cluster.DeleteNetworkForward(n.ID(), forwardID)
+		_ = n.forwardSetupFirewall()
+		_ = n.forwardBGPSetupPrefixes()
 	})
 
 	err = n.forwardSetupFirewall()
@@ -2625,18 +2642,18 @@ func (n *bridge) ForwardCreate(forward api.NetworkForwardsPost, clientType reque
 					return err
 				}
 
-				filter := db.InstanceFilter{
+				filter := dbCluster.InstanceFilter{
 					Node: &localNode,
 				}
 
-				err = n.state.DB.Cluster.InstanceList(&filter, func(inst db.Instance, p api.Project, profiles []api.Profile) error {
+				err = n.state.DB.Cluster.InstanceList(&filter, func(inst db.InstanceArgs, p api.Project, profiles []api.Profile) error {
 					// Get the instance's effective network project name.
 					instNetworkProject := project.NetworkProjectFromRecord(&p)
 
 					if instNetworkProject != project.Default {
 						return nil // Managed bridge networks can only exist in default project.
 					}
-					devices := db.ExpandInstanceDevices(deviceConfig.NewDevices(db.DevicesToAPI(inst.Devices)), profiles)
+					devices := db.ExpandInstanceDevices(inst.Devices.Clone(), profiles)
 
 					// Iterate through each of the instance's devices, looking for bridged NICs
 					// that are linked to this network.
@@ -2721,9 +2738,9 @@ func (n *bridge) ForwardUpdate(listenAddress string, req api.NetworkForwardPut, 
 	}
 
 	revert.Add(func() {
-		n.state.DB.Cluster.UpdateNetworkForward(n.ID(), curForwardID, &curForward.NetworkForwardPut)
-		n.forwardSetupFirewall()
-		n.forwardBGPSetupPrefixes()
+		_ = n.state.DB.Cluster.UpdateNetworkForward(n.ID(), curForwardID, &curForward.NetworkForwardPut)
+		_ = n.forwardSetupFirewall()
+		_ = n.forwardBGPSetupPrefixes()
 	})
 
 	err = n.forwardSetupFirewall()
@@ -2756,9 +2773,9 @@ func (n *bridge) ForwardDelete(listenAddress string, clientType request.ClientTy
 			NetworkForwardPut: forward.NetworkForwardPut,
 			ListenAddress:     forward.ListenAddress,
 		}
-		n.state.DB.Cluster.CreateNetworkForward(n.ID(), memberSpecific, &newForward)
-		n.forwardSetupFirewall()
-		n.forwardBGPSetupPrefixes()
+		_, _ = n.state.DB.Cluster.CreateNetworkForward(n.ID(), memberSpecific, &newForward)
+		_ = n.forwardSetupFirewall()
+		_ = n.forwardBGPSetupPrefixes()
 	})
 
 	err = n.forwardSetupFirewall()

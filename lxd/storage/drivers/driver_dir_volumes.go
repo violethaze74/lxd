@@ -33,7 +33,7 @@ func (d *dir) CreateVolume(vol Volume, filler *VolumeFiller, op *operations.Oper
 	if err != nil {
 		return err
 	}
-	revert.Add(func() { os.RemoveAll(volPath) })
+	revert.Add(func() { _ = os.RemoveAll(volPath) })
 
 	// Create sparse loopback file if volume is block.
 	rootBlockPath := ""
@@ -129,7 +129,7 @@ func (d *dir) CreateVolumeFromBackup(vol Volume, srcBackup backup.Info, srcData 
 }
 
 // CreateVolumeFromCopy provides same-pool volume copying functionality.
-func (d *dir) CreateVolumeFromCopy(vol Volume, srcVol Volume, copySnapshots bool, op *operations.Operation) error {
+func (d *dir) CreateVolumeFromCopy(vol Volume, srcVol Volume, copySnapshots bool, allowInconsistent bool, op *operations.Operation) error {
 	var err error
 	var srcSnapshots []Volume
 
@@ -142,7 +142,7 @@ func (d *dir) CreateVolumeFromCopy(vol Volume, srcVol Volume, copySnapshots bool
 	}
 
 	// Run the generic copy.
-	return genericVFSCopyVolume(d, d.setupInitialQuota, vol, srcVol, srcSnapshots, false, op)
+	return genericVFSCopyVolume(d, d.setupInitialQuota, vol, srcVol, srcSnapshots, false, allowInconsistent, op)
 }
 
 // CreateVolumeFromMigration creates a volume being sent via a migration.
@@ -151,8 +151,8 @@ func (d *dir) CreateVolumeFromMigration(vol Volume, conn io.ReadWriteCloser, vol
 }
 
 // RefreshVolume provides same-pool volume and specific snapshots syncing functionality.
-func (d *dir) RefreshVolume(vol Volume, srcVol Volume, srcSnapshots []Volume, op *operations.Operation) error {
-	return genericVFSCopyVolume(d, d.setupInitialQuota, vol, srcVol, srcSnapshots, true, op)
+func (d *dir) RefreshVolume(vol Volume, srcVol Volume, srcSnapshots []Volume, allowInconsistent bool, op *operations.Operation) error {
+	return genericVFSCopyVolume(d, d.setupInitialQuota, vol, srcVol, srcSnapshots, true, allowInconsistent, op)
 }
 
 // DeleteVolume deletes a volume of the storage device. If any snapshots of the volume remain then
@@ -390,7 +390,7 @@ func (d *dir) CreateVolumeSnapshot(snapVol Volume, op *operations.Operation) err
 	defer revert.Fail()
 
 	snapPath := snapVol.MountPath()
-	revert.Add(func() { os.RemoveAll(snapPath) })
+	revert.Add(func() { _ = os.RemoveAll(snapPath) })
 
 	if snapVol.contentType != ContentTypeBlock || snapVol.volType != VolumeTypeCustom {
 		var rsyncArgs []string

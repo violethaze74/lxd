@@ -182,7 +182,7 @@ func CheckTrustState(cert x509.Certificate, trustedCerts map[string]x509.Certifi
 
 	// Check whether client certificate is in trust store.
 	for fingerprint, v := range trustedCerts {
-		if bytes.Compare(cert.Raw, v.Raw) == 0 {
+		if bytes.Equal(cert.Raw, v.Raw) {
 			logger.Debug("Matched trusted cert", logger.Ctx{"fingerprint": fingerprint, "subject": v.Subject})
 			return true, fingerprint
 		}
@@ -279,8 +279,8 @@ func ListenAddresses(configListenAddress string) ([]string, error) {
 // see the docstring of SystemdListenFDsStart below.
 func GetListeners(start int) []net.Listener {
 	defer func() {
-		os.Unsetenv("LISTEN_PID")
-		os.Unsetenv("LISTEN_FDS")
+		_ = os.Unsetenv("LISTEN_PID")
+		_ = os.Unsetenv("LISTEN_FDS")
 	}()
 
 	pid, err := strconv.Atoi(os.Getenv("LISTEN_PID"))

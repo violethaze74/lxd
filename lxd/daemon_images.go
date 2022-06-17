@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/lxc/lxd/client"
-	"github.com/lxc/lxd/lxd/cluster"
-	"github.com/lxc/lxd/lxd/db"
+	clusterConfig "github.com/lxc/lxd/lxd/cluster/config"
+	"github.com/lxc/lxd/lxd/db/cluster"
 	"github.com/lxc/lxd/lxd/lifecycle"
 	"github.com/lxc/lxd/lxd/locking"
 	"github.com/lxc/lxd/lxd/operations"
@@ -47,8 +47,9 @@ type ImageDownloadArgs struct {
 
 // imageOperationLock acquires a lock for operating on an image and returns the unlock function.
 func (d *Daemon) imageOperationLock(fingerprint string) locking.UnlockFunc {
-	logger.Debugf("Acquiring lock for image %q", fingerprint)
-	defer logger.Debugf("Lock acquired for image %q", fingerprint)
+	l := logger.AddContext(logger.Log, logger.Ctx{"fingerprint": fingerprint})
+	l.Debug("Acquiring lock for image")
+	defer l.Debug("Lock acquired for image")
 
 	return locking.Lock(fmt.Sprintf("ImageOperation_%s", fingerprint))
 }
@@ -128,7 +129,7 @@ func (d *Daemon) ImageDownload(r *http.Request, op *operations.Operation, args *
 	// server/protocol/alias, regardless of whether it's stale or
 	// not (we can assume that it will be not *too* stale since
 	// auto-update is on).
-	interval, err := cluster.ConfigGetInt64(d.db.Cluster, "images.auto_update_interval")
+	interval, err := clusterConfig.GetInt64(d.db.Cluster, "images.auto_update_interval")
 	if err != nil {
 		return nil, err
 	}
@@ -143,7 +144,7 @@ func (d *Daemon) ImageDownload(r *http.Request, op *operations.Operation, args *
 	}
 
 	// Check if the image already exists in this project (partial hash match).
-	_, imgInfo, err := d.db.Cluster.GetImage(fp, db.ImageFilter{Project: &args.ProjectName})
+	_, imgInfo, err := d.db.Cluster.GetImage(fp, cluster.ImageFilter{Project: &args.ProjectName})
 	if err == nil {
 		// Check if the image is available locally or it's on another node.
 		nodeAddress, err := d.State().DB.Cluster.LocateImage(imgInfo.Fingerprint)
@@ -182,7 +183,7 @@ func (d *Daemon) ImageDownload(r *http.Request, op *operations.Operation, args *
 			}
 
 			var id int
-			id, imgInfo, err = d.db.Cluster.GetImage(fp, db.ImageFilter{Project: &args.ProjectName})
+			id, imgInfo, err = d.db.Cluster.GetImage(fp, cluster.ImageFilter{Project: &args.ProjectName})
 			if err != nil {
 				return nil, err
 			}
@@ -261,8 +262,8 @@ func (d *Daemon) ImageDownload(r *http.Request, op *operations.Operation, args *
 	failure := true
 	cleanup := func() {
 		if failure {
-			os.Remove(destName)
-			os.Remove(destName + ".rootfs")
+			_ = os.Remove(destName)
+			_ = os.Remove(destName + ".rootfs")
 		}
 	}
 	defer cleanup()
@@ -280,7 +281,7 @@ func (d *Daemon) ImageDownload(r *http.Request, op *operations.Operation, args *
 
 		if meta["download_progress"] != progress.Text {
 			meta["download_progress"] = progress.Text
-			op.UpdateMetadata(meta)
+			_ = op.UpdateMetadata(meta)
 		}
 	}
 
@@ -296,13 +297,13 @@ func (d *Daemon) ImageDownload(r *http.Request, op *operations.Operation, args *
 		if err != nil {
 			return nil, err
 		}
-		defer dest.Close()
+		defer func() { _ = dest.Close() }()
 
 		destRootfs, err := os.Create(destName + ".rootfs")
 		if err != nil {
 			return nil, err
 		}
-		defer destRootfs.Close()
+		defer func() { _ = destRootfs.Close() }()
 
 		// Get the image information
 		if info == nil {
@@ -377,6 +378,16 @@ func (d *Daemon) ImageDownload(r *http.Request, op *operations.Operation, args *
 				return nil, err
 			}
 		}
+
+		err = dest.Close()
+		if err != nil {
+			return nil, err
+		}
+
+		err = destRootfs.Close()
+		if err != nil {
+			return nil, err
+		}
 	} else if protocol == "direct" {
 		// Setup HTTP client
 		httpClient, err := util.HTTPClient(args.Certificate, d.proxy)
@@ -418,7 +429,7 @@ func (d *Daemon) ImageDownload(r *http.Request, op *operations.Operation, args *
 		if err != nil {
 			return nil, err
 		}
-		defer f.Close()
+		defer func() { _ = f.Close() }()
 
 		// Hashing
 		sha256 := sha256.New()
@@ -450,6 +461,11 @@ func (d *Daemon) ImageDownload(r *http.Request, op *operations.Operation, args *
 		info.ExpiresAt = time.Unix(imageMeta.ExpiryDate, 0)
 		info.Properties = imageMeta.Properties
 		info.Type = imageType
+
+		err = f.Close()
+		if err != nil {
+			return nil, err
+		}
 	} else {
 		return nil, fmt.Errorf("Unsupported protocol: %v", protocol)
 	}
@@ -491,7 +507,7 @@ func (d *Daemon) ImageDownload(r *http.Request, op *operations.Operation, args *
 
 	// Record the image source
 	if alias != fp {
-		id, _, err := d.db.Cluster.GetImage(fp, db.ImageFilter{Project: &args.ProjectName})
+		id, _, err := d.db.Cluster.GetImage(fp, cluster.ImageFilter{Project: &args.ProjectName})
 		if err != nil {
 			return nil, err
 		}

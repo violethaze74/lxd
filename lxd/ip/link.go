@@ -169,13 +169,13 @@ func (l *Link) GetVFInfo(vfID int) (VirtFuncInfo, error) {
 		if err != nil {
 			return vf, err
 		}
-		defer stdout.Close()
+		defer func() { _ = stdout.Close() }()
 
 		err = cmd.Start()
 		if err != nil {
 			return vf, err
 		}
-		defer cmd.Wait()
+		defer func() { _ = cmd.Wait() }()
 
 		// Try and match: "vf 1 MAC 00:00:00:00:00:00, vlan 4095, spoof checking off"
 		reVlan := regexp.MustCompile(fmt.Sprintf(`vf %d MAC ((?:[[:xdigit:]]{2}:){5}[[:xdigit:]]{2}).*, vlan (\d+), spoof checking (\w+)`, vfID))
@@ -226,13 +226,13 @@ func (l *Link) GetVFInfo(vfID int) (VirtFuncInfo, error) {
 	if err != nil {
 		return vf, err
 	}
-	defer stdout.Close()
+	defer func() { _ = stdout.Close() }()
 
 	err = cmd.Start()
 	if err != nil {
 		return vf, err
 	}
-	defer cmd.Wait()
+	defer func() { _ = cmd.Wait() }()
 
 	// Temporary struct to decode ip output into.
 	var ifInfo []struct {
@@ -310,19 +310,19 @@ func (l *Link) Delete() error {
 func (l *Link) BridgeVLANAdd(vid string, pvid bool, untagged bool, self bool, master bool) error {
 	cmd := []string{"vlan", "add", "dev", l.Name, "vid", vid}
 
-	if pvid == true {
+	if pvid {
 		cmd = append(cmd, "pvid")
 	}
 
-	if untagged == true {
+	if untagged {
 		cmd = append(cmd, "untagged")
 	}
 
-	if self == true {
+	if self {
 		cmd = append(cmd, "self")
 	}
 
-	if master == true {
+	if master {
 		cmd = append(cmd, "master")
 	}
 
@@ -337,11 +337,11 @@ func (l *Link) BridgeVLANAdd(vid string, pvid bool, untagged bool, self bool, ma
 func (l *Link) BridgeVLANDelete(vid string, self bool, master bool) error {
 	cmd := []string{"vlan", "del", "dev", l.Name, "vid", vid}
 
-	if self == true {
+	if self {
 		cmd = append(cmd, "self")
 	}
 
-	if master == true {
+	if master {
 		cmd = append(cmd, "master")
 	}
 
@@ -355,7 +355,7 @@ func (l *Link) BridgeVLANDelete(vid string, self bool, master bool) error {
 // BridgeLinkSetIsolated sets bridge 'isolated' attribute on a port
 func (l *Link) BridgeLinkSetIsolated(isolated bool) error {
 	isolatedState := "on"
-	if isolated == false {
+	if !isolated {
 		isolatedState = "off"
 	}
 
@@ -369,7 +369,7 @@ func (l *Link) BridgeLinkSetIsolated(isolated bool) error {
 // BridgeLinkSetHairpin sets bridge 'hairpin' attribute on a port
 func (l *Link) BridgeLinkSetHairpin(hairpin bool) error {
 	hairpinState := "on"
-	if hairpin == false {
+	if !hairpin {
 		hairpinState = "off"
 	}
 

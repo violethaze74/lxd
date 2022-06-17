@@ -19,7 +19,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/lxc/lxd/lxd/cluster"
-	"github.com/lxc/lxd/lxd/db"
+	"github.com/lxc/lxd/lxd/db/operationtype"
 	"github.com/lxc/lxd/lxd/instance"
 	"github.com/lxc/lxd/lxd/instance/instancetype"
 	"github.com/lxc/lxd/lxd/operations"
@@ -130,7 +130,7 @@ func (s *execWs) Do(op *operations.Operation) error {
 		s.connsLock.Lock()
 		for i := range s.conns {
 			if s.conns[i] != nil {
-				s.conns[i].Close()
+				_ = s.conns[i].Close()
 			}
 		}
 		s.connsLock.Unlock()
@@ -177,7 +177,7 @@ func (s *execWs) Do(op *operations.Operation) error {
 
 			if devptsFd != nil && s.s.OS.NativeTerminals {
 				ptys[0], ttys[0], err = shared.OpenPtyInDevpts(int(devptsFd.Fd()), rootUID, rootGID)
-				devptsFd.Close()
+				_ = devptsFd.Close()
 				devptsFd = nil
 			} else {
 				ptys[0], ttys[0], err = shared.OpenPty(rootUID, rootGID)
@@ -191,7 +191,7 @@ func (s *execWs) Do(op *operations.Operation) error {
 			stderr = ttys[0]
 
 			if s.req.Width > 0 && s.req.Height > 0 {
-				shared.SetSize(int(ptys[0].Fd()), s.req.Width, s.req.Height)
+				_ = shared.SetSize(int(ptys[0].Fd()), s.req.Width, s.req.Height)
 			}
 		} else {
 			// For VMs we rely on the lxd-agent PTY running inside the VM guest.
@@ -231,7 +231,7 @@ func (s *execWs) Do(op *operations.Operation) error {
 		close(attachedChildIsDead)
 
 		for _, tty := range ttys {
-			tty.Close()
+			_ = tty.Close()
 		}
 
 		s.connsLock.Lock()
@@ -241,13 +241,16 @@ func (s *execWs) Do(op *operations.Operation) error {
 		if conn == nil {
 			s.controlConnectedDone() // Request control go routine to end if no control connection.
 		} else {
-			conn.Close() // Close control connection (will cause control go routine to end).
+			err = conn.Close() // Close control connection (will cause control go routine to end).
+			if err != nil && cmdErr == nil {
+				cmdErr = err
+			}
 		}
 
 		wgEOF.Wait()
 
 		for _, pty := range ptys {
-			pty.Close()
+			_ = pty.Close()
 		}
 
 		metadata := shared.Jmap{"return": cmdResult}
@@ -397,7 +400,7 @@ func (s *execWs) Do(op *operations.Operation) error {
 
 			<-readDone
 			<-writeDone
-			conn.Close()
+			_ = conn.Close()
 		}()
 	} else {
 		wgEOF.Add(len(ttys) - 1)
@@ -435,10 +438,10 @@ func (s *execWs) Do(op *operations.Operation) error {
 
 				if i == execWSStdin {
 					<-shared.WebsocketRecvStream(ttys[i], conn)
-					ttys[i].Close()
+					_ = ttys[i].Close()
 				} else {
 					<-shared.WebsocketSendStream(conn, ptys[i], -1)
-					ptys[i].Close()
+					_ = ptys[i].Close()
 					wgEOF.Done()
 				}
 			}(i)
@@ -641,7 +644,7 @@ func instanceExecPost(d *Daemon, r *http.Request) response.Response {
 			resources["containers"] = resources["instances"]
 		}
 
-		op, err := operations.OperationCreate(d.State(), projectName, operations.OperationClassWebsocket, db.OperationCommandExec, resources, ws.Metadata(), ws.Do, nil, ws.Connect, r)
+		op, err := operations.OperationCreate(d.State(), projectName, operations.OperationClassWebsocket, operationtype.CommandExec, resources, ws.Metadata(), ws.Do, nil, ws.Connect, r)
 		if err != nil {
 			return response.InternalError(err)
 		}
@@ -661,13 +664,13 @@ func instanceExecPost(d *Daemon, r *http.Request) response.Response {
 			if err != nil {
 				return err
 			}
-			defer stdout.Close()
+			defer func() { _ = stdout.Close() }()
 
 			stderr, err = os.OpenFile(filepath.Join(inst.LogPath(), fmt.Sprintf("exec_%s.stderr", op.ID())), os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0666)
 			if err != nil {
 				return err
 			}
-			defer stderr.Close()
+			defer func() { _ = stderr.Close() }()
 
 			// Update metadata with the right URLs.
 			metadata["output"] = shared.Jmap{
@@ -708,7 +711,7 @@ func instanceExecPost(d *Daemon, r *http.Request) response.Response {
 		resources["containers"] = resources["instances"]
 	}
 
-	op, err := operations.OperationCreate(d.State(), projectName, operations.OperationClassTask, db.OperationCommandExec, resources, nil, run, nil, nil, r)
+	op, err := operations.OperationCreate(d.State(), projectName, operations.OperationClassTask, operationtype.CommandExec, resources, nil, run, nil, nil, r)
 	if err != nil {
 		return response.InternalError(err)
 	}

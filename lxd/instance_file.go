@@ -149,15 +149,15 @@ func instanceFileHandler(d *Daemon, r *http.Request) response.Response {
 //   "500":
 //     $ref: "#/responses/InternalServerError"
 func instanceFileGet(s *state.State, inst instance.Instance, path string, r *http.Request) response.Response {
-	reverter := revert.New()
-	defer reverter.Fail()
+	revert := revert.New()
+	defer revert.Fail()
 
 	// Get a SFTP client.
 	client, err := inst.FileSFTP()
 	if err != nil {
 		return response.InternalError(err)
 	}
-	reverter.Add(func() { client.Close() })
+	revert.Add(func() { _ = client.Close() })
 
 	// Get the file stats.
 	stat, err := client.Lstat(path)
@@ -189,11 +189,11 @@ func instanceFileGet(s *state.State, inst instance.Instance, path string, r *htt
 		if err != nil {
 			return response.SmartError(err)
 		}
-		reverter.Add(func() { file.Close() })
+		revert.Add(func() { _ = file.Close() })
 
 		// Setup cleanup logic.
-		cleanup := reverter.Clone()
-		reverter.Success()
+		cleanup := revert.Clone()
+		revert.Success()
 
 		// Make a file response struct.
 		files := make([]response.FileResponseEntry, 1)
@@ -310,15 +310,15 @@ func instanceFileGet(s *state.State, inst instance.Instance, path string, r *htt
 //   "500":
 //     $ref: "#/responses/InternalServerError"
 func instanceFileHead(s *state.State, inst instance.Instance, path string, r *http.Request) response.Response {
-	reverter := revert.New()
-	defer reverter.Fail()
+	revert := revert.New()
+	defer revert.Fail()
 
 	// Get a SFTP client.
 	client, err := inst.FileSFTP()
 	if err != nil {
 		return response.InternalError(err)
 	}
-	reverter.Add(func() { client.Close() })
+	revert.Add(func() { _ = client.Close() })
 
 	// Get the file stats.
 	stat, err := client.Lstat(path)
@@ -429,7 +429,7 @@ func instanceFilePost(s *state.State, inst instance.Instance, path string, r *ht
 	if err != nil {
 		return response.InternalError(err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	// Extract file ownership and mode from headers
 	uid, gid, mode, type_, write := shared.ParseLXDFileHeaders(r.Header)
@@ -454,7 +454,7 @@ func instanceFilePost(s *state.State, inst instance.Instance, path string, r *ht
 		if err != nil {
 			return response.SmartError(err)
 		}
-		defer file.Close()
+		defer func() { _ = file.Close() }()
 
 		// Go to the end of the file.
 		_, err = file.Seek(0, io.SeekEnd)
@@ -584,7 +584,7 @@ func instanceFileDelete(s *state.State, inst instance.Instance, path string, r *
 	if err != nil {
 		return response.InternalError(err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	// Delete the file.
 	err = client.Remove(path)

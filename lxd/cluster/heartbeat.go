@@ -125,7 +125,7 @@ func (hbState *APIHeartbeat) Update(fullStateList bool, raftNodes []db.RaftNode,
 	}
 
 	if len(raftNodeMap) > 0 && hbState.cluster != nil {
-		hbState.cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		_ = hbState.cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
 			for addr, raftNode := range raftNodeMap {
 				_, err := tx.GetPendingNodeByAddress(addr)
 				if err != nil {
@@ -136,8 +136,6 @@ func (hbState *APIHeartbeat) Update(fullStateList bool, raftNodes []db.RaftNode,
 			return nil
 		})
 	}
-
-	return
 }
 
 // Send sends heartbeat requests to the nodes supplied and updates heartbeat state.
@@ -492,13 +490,18 @@ func (g *Gateway) heartbeat(ctx context.Context, mode heartbeatMode) {
 		g.HeartbeatNodeHook(hbState, true, unavailableMembers)
 	}
 
-	duration := time.Now().Sub(startTime)
+	duration := time.Since(startTime)
 	if duration > heartbeatInterval {
 		logger.Warn("Heartbeat round duration greater than heartbeat interval", logger.Ctx{"duration": duration, "interval": heartbeatInterval})
 	}
 
-	// Update last leader heartbeat time so next time a full node state list can be sent (if not this time).
-	logger.Debug("Completed heartbeat round", logger.Ctx{"duration": duration, "local": localAddress})
+	if mode != hearbeatNormal {
+		// Log unscheduled heartbeats with a higher level than normal heartbeats.
+		logger.Info("Completed heartbeat round", logger.Ctx{"duration": duration, "local": localAddress})
+	} else {
+		// Don't spam the normal log with regular heartbeat messages.
+		logger.Debug("Completed heartbeat round", logger.Ctx{"duration": duration, "local": localAddress})
+	}
 }
 
 // HeartbeatNode performs a single heartbeat request against the node with the given address.
@@ -543,7 +546,7 @@ func HeartbeatNode(taskCtx context.Context, address string, networkCert *shared.
 	if err != nil {
 		return fmt.Errorf("Failed to send heartbeat request: %w", err)
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 
 	if response.StatusCode != http.StatusOK {
 		return fmt.Errorf("Heartbeat request failed with status: %w", api.StatusErrorf(response.StatusCode, response.Status))

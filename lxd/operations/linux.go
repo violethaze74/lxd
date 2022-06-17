@@ -8,29 +8,30 @@ import (
 
 	"github.com/lxc/lxd/lxd/db"
 	"github.com/lxc/lxd/lxd/db/cluster"
+	"github.com/lxc/lxd/lxd/db/operationtype"
 )
 
-func registerDBOperation(op *Operation, opType db.OperationType) error {
+func registerDBOperation(op *Operation, opType operationtype.Type) error {
 	if op.state == nil {
 		return nil
 	}
 
 	err := op.state.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
-		opInfo := db.Operation{
+		opInfo := cluster.Operation{
 			UUID:   op.id,
 			Type:   opType,
 			NodeID: tx.GetNodeID(),
 		}
 
 		if op.projectName != "" {
-			projectID, err := cluster.GetProjectID(context.Background(), tx.Tx(), op.projectName)
+			projectID, err := cluster.GetProjectID(ctx, tx.Tx(), op.projectName)
 			if err != nil {
 				return fmt.Errorf("Fetch project ID: %w", err)
 			}
 			opInfo.ProjectID = &projectID
 		}
 
-		_, err := tx.CreateOrReplaceOperation(opInfo)
+		_, err := cluster.CreateOrReplaceOperation(ctx, tx.Tx(), opInfo)
 		return err
 	})
 	if err != nil {
@@ -46,28 +47,10 @@ func removeDBOperation(op *Operation) error {
 	}
 
 	err := op.state.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
-		return tx.DeleteOperation(op.id)
+		return cluster.DeleteOperation(ctx, tx.Tx(), op.id)
 	})
 
 	return err
-}
-
-func getServerName(op *Operation) (string, error) {
-	if op.state == nil {
-		return "", nil
-	}
-
-	var serverName string
-	var err error
-	err = op.state.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
-		serverName, err = tx.GetLocalNodeName()
-		return err
-	})
-	if err != nil {
-		return "", err
-	}
-
-	return serverName, nil
 }
 
 func (op *Operation) sendEvent(eventMessage any) {
@@ -75,5 +58,5 @@ func (op *Operation) sendEvent(eventMessage any) {
 		return
 	}
 
-	op.events.Send(op.projectName, "operation", eventMessage)
+	_ = op.events.Send(op.projectName, "operation", eventMessage)
 }

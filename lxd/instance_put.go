@@ -10,6 +10,8 @@ import (
 	"github.com/gorilla/mux"
 
 	"github.com/lxc/lxd/lxd/db"
+	"github.com/lxc/lxd/lxd/db/cluster"
+	"github.com/lxc/lxd/lxd/db/operationtype"
 	deviceConfig "github.com/lxc/lxd/lxd/device/config"
 	"github.com/lxc/lxd/lxd/instance"
 	"github.com/lxc/lxd/lxd/instance/instancetype"
@@ -104,10 +106,25 @@ func instancePut(d *Daemon, r *http.Request) response.Response {
 	}
 
 	var do func(*operations.Operation) error
-	var opType db.OperationType
+	var opType operationtype.Type
 	if configRaw.Restore == "" {
 		// Check project limits.
+		apiProfiles := make([]api.Profile, 0, len(configRaw.Profiles))
 		err = d.db.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+			profiles, err := cluster.GetProfilesIfEnabled(ctx, tx.Tx(), projectName, configRaw.Profiles)
+			if err != nil {
+				return err
+			}
+
+			for _, profile := range profiles {
+				apiProfile, err := profile.ToAPI(ctx, tx.Tx())
+				if err != nil {
+					return err
+				}
+
+				apiProfiles = append(apiProfiles, *apiProfile)
+			}
+
 			return projecthelpers.AllowInstanceUpdate(tx, projectName, name, configRaw, inst.LocalConfig())
 		})
 		if err != nil {
@@ -122,7 +139,7 @@ func instancePut(d *Daemon, r *http.Request) response.Response {
 				Description:  configRaw.Description,
 				Devices:      deviceConfig.NewDevices(configRaw.Devices),
 				Ephemeral:    configRaw.Ephemeral,
-				Profiles:     configRaw.Profiles,
+				Profiles:     apiProfiles,
 				Project:      projectName,
 			}
 
@@ -134,14 +151,14 @@ func instancePut(d *Daemon, r *http.Request) response.Response {
 			return nil
 		}
 
-		opType = db.OperationInstanceUpdate
+		opType = operationtype.InstanceUpdate
 	} else {
 		// Snapshot Restore
 		do = func(op *operations.Operation) error {
 			return instanceSnapRestore(d.State(), projectName, name, configRaw.Restore, configRaw.Stateful)
 		}
 
-		opType = db.OperationSnapshotRestore
+		opType = operationtype.SnapshotRestore
 	}
 
 	resources := map[string][]string{}

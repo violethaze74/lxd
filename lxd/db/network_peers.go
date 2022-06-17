@@ -129,7 +129,7 @@ func networkPeerConfigAdd(tx *sql.Tx, peerID int64, config map[string]string) er
 	if err != nil {
 		return err
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	for k, v := range config {
 		if v == "" {
@@ -372,9 +372,7 @@ func (c *Cluster) GetNetworkPeerNames(networkID int64) (map[int64]string, error)
 
 // UpdateNetworkPeer updates an existing Network Peer.
 func (c *Cluster) UpdateNetworkPeer(networkID int64, peerID int64, info *api.NetworkPeerPut) error {
-	var err error
-
-	err = c.Transaction(context.TODO(), func(ctx context.Context, tx *ClusterTx) error {
+	err := c.Transaction(context.TODO(), func(ctx context.Context, tx *ClusterTx) error {
 		// Update existing Network peer record.
 		res, err := tx.tx.Exec(`
 		UPDATE networks_peers

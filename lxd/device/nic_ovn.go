@@ -8,7 +8,7 @@ import (
 
 	"github.com/mdlayher/netx/eui64"
 
-	"github.com/lxc/lxd/lxd/cluster"
+	clusterConfig "github.com/lxc/lxd/lxd/cluster/config"
 	deviceConfig "github.com/lxc/lxd/lxd/device/config"
 	pcidev "github.com/lxc/lxd/lxd/device/pci"
 	"github.com/lxc/lxd/lxd/dnsmasq/dhcpalloc"
@@ -61,7 +61,7 @@ func (d *nicOVN) UpdatableFields(oldDevice Type) []string {
 
 // getIntegrationBridgeName returns the OVS integration bridge to use.
 func (d *nicOVN) getIntegrationBridgeName() (string, error) {
-	integrationBridge, err := cluster.ConfigGetString(d.state.DB.Cluster, "network.ovn.integration_bridge")
+	integrationBridge, err := clusterConfig.GetString(d.state.DB.Cluster, "network.ovn.integration_bridge")
 	if err != nil {
 		return "", fmt.Errorf("Failed to get OVN integration bridge name: %w", err)
 	}
@@ -181,7 +181,7 @@ func (d *nicOVN) validateConfig(instConf instance.ConfigReader) error {
 	}
 
 	// Apply network level config options to device config before validation.
-	d.config["mtu"] = fmt.Sprintf("%s", netConfig["bridge.mtu"])
+	d.config["mtu"] = netConfig["bridge.mtu"]
 
 	rules := nicValidationRules(requiredFields, optionalFields, instConf)
 
@@ -355,16 +355,17 @@ func (d *nicOVN) Start() (*deviceConfig.RunConfig, error) {
 			}
 		}
 
-		revert.Add(func() { network.InterfaceRemove(saveData["host_name"]) })
+		revert.Add(func() { _ = network.InterfaceRemove(saveData["host_name"]) })
 	}
 
 	// Populate device config with volatile fields if needed.
 	networkVethFillFromVolatile(d.config, saveData)
 
-	err = d.setupHostNIC(revert, saveData["host_name"], uplink)
+	cleanup, err := d.setupHostNIC(saveData["host_name"], uplink)
 	if err != nil {
 		return nil, err
 	}
+	revert.Add(cleanup)
 
 	err = d.volatileSet(saveData)
 	if err != nil {
@@ -554,18 +555,20 @@ func (d *nicOVN) Stop() (*deviceConfig.RunConfig, error) {
 
 // postStop is run after the device is removed from the instance.
 func (d *nicOVN) postStop() error {
-	defer d.volatileSet(map[string]string{
-		"host_name":                "",
-		"last_state.hwaddr":        "",
-		"last_state.mtu":           "",
-		"last_state.created":       "",
-		"last_state.vf.parent":     "",
-		"last_state.vf.id":         "",
-		"last_state.vf.hwaddr":     "",
-		"last_state.vf.vlan":       "",
-		"last_state.vf.spoofcheck": "",
-		"last_state.pci.driver":    "",
-	})
+	defer func() {
+		_ = d.volatileSet(map[string]string{
+			"host_name":                "",
+			"last_state.hwaddr":        "",
+			"last_state.mtu":           "",
+			"last_state.created":       "",
+			"last_state.vf.parent":     "",
+			"last_state.vf.id":         "",
+			"last_state.vf.hwaddr":     "",
+			"last_state.vf.vlan":       "",
+			"last_state.vf.spoofcheck": "",
+			"last_state.pci.driver":    "",
+		})
+	}()
 
 	v := d.volatileGet()
 
@@ -749,18 +752,21 @@ func (d *nicOVN) Register() error {
 	return nil
 }
 
-func (d *nicOVN) setupHostNIC(revert *revert.Reverter, hostName string, uplink *api.Network) error {
+func (d *nicOVN) setupHostNIC(hostName string, uplink *api.Network) (revert.Hook, error) {
+	revert := revert.New()
+	defer revert.Fail()
+
 	// Disable IPv6 on host-side veth interface (prevents host-side interface getting link-local address and
 	// accepting router advertisements) as not needed because the host-side interface is connected to a bridge.
 	err := util.SysctlSet(fmt.Sprintf("net/ipv6/conf/%s/disable_ipv6", hostName), "1")
 	if err != nil && !os.IsNotExist(err) {
-		return err
+		return nil, err
 	}
 
 	// Attempt to disable IPv4 forwarding.
 	err = util.SysctlSet(fmt.Sprintf("net/ipv4/conf/%s/forwarding", hostName), "0")
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// Add new OVN logical switch port for instance.
@@ -772,11 +778,11 @@ func (d *nicOVN) setupHostNIC(revert *revert.Reverter, hostName string, uplink *
 		UplinkConfig: uplink.Config,
 	}, nil)
 	if err != nil {
-		return fmt.Errorf("Failed setting up OVN port: %w", err)
+		return nil, fmt.Errorf("Failed setting up OVN port: %w", err)
 	}
 
 	revert.Add(func() {
-		d.network.InstanceDevicePortDelete("", &network.OVNInstanceNICStopOpts{
+		_ = d.network.InstanceDevicePortDelete("", &network.OVNInstanceNICStopOpts{
 			InstanceUUID: d.inst.LocalConfig()["volatile.uuid"],
 			DeviceName:   d.name,
 			DeviceConfig: d.config,
@@ -786,29 +792,31 @@ func (d *nicOVN) setupHostNIC(revert *revert.Reverter, hostName string, uplink *
 	// Attach host side veth interface to bridge.
 	integrationBridge, err := d.getIntegrationBridgeName()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	ovs := openvswitch.NewOVS()
 	err = ovs.BridgePortAdd(integrationBridge, hostName, true)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	revert.Add(func() { ovs.BridgePortDelete(integrationBridge, hostName) })
+	revert.Add(func() { _ = ovs.BridgePortDelete(integrationBridge, hostName) })
 
 	// Link OVS port to OVN logical port.
 	err = ovs.InterfaceAssociateOVNSwitchPort(hostName, logicalPortName)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// Make sure the port is up.
 	link := &ip.Link{Name: hostName}
 	err = link.SetUp()
 	if err != nil {
-		return fmt.Errorf("Failed to bring up the host interface %s: %w", hostName, err)
+		return nil, fmt.Errorf("Failed to bring up the host interface %s: %w", hostName, err)
 	}
 
-	return nil
+	cleanup := revert.Clone().Fail
+	revert.Success()
+	return cleanup, err
 }

@@ -18,6 +18,7 @@ import (
 	"github.com/mdlayher/netx/eui64"
 
 	"github.com/lxc/lxd/lxd/db"
+	"github.com/lxc/lxd/lxd/db/cluster"
 	deviceConfig "github.com/lxc/lxd/lxd/device/config"
 	"github.com/lxc/lxd/lxd/dnsmasq"
 	"github.com/lxc/lxd/lxd/dnsmasq/dhcpalloc"
@@ -288,98 +289,7 @@ func (d *nicBridged) validateConfig(instConf instance.ConfigReader) error {
 	// Check there isn't another NIC with any of the same addresses specified on the same cluster member.
 	// Can only validate this when the instance is supplied (and not doing profile validation).
 	if d.inst != nil {
-		node := d.inst.Location()
-		filter := db.InstanceFilter{
-			Node: &node, // Managed bridge networks have a per-server DHCP daemon.
-		}
-
-		ourNICIPs := make(map[string]net.IP, 2)
-		ourNICIPs["ipv4.address"] = net.ParseIP(d.config["ipv4.address"])
-		ourNICIPs["ipv6.address"] = net.ParseIP(d.config["ipv6.address"])
-
-		ourNICMAC, _ := net.ParseMAC(d.config["hwaddr"])
-		if ourNICMAC == nil {
-			v := d.volatileGet()
-			ourNICMAC, _ = net.ParseMAC(v["hwaddr"])
-		}
-
-		err := d.state.DB.Cluster.InstanceList(&filter, func(inst db.Instance, p api.Project, profiles []api.Profile) error {
-			// Get the instance's effective network project name.
-			instNetworkProject := project.NetworkProjectFromRecord(&p)
-
-			if instNetworkProject != project.Default {
-				return nil // Managed bridge networks can only exist in default project.
-			}
-
-			devices := db.ExpandInstanceDevices(deviceConfig.NewDevices(db.DevicesToAPI(inst.Devices)), profiles)
-			// Iterate through each of the instance's devices, looking for NICs that are linked to
-			// the same network, on the same cluster member as this NIC and have matching static IPs.
-			for devName, devConfig := range devices {
-				if devConfig["type"] != "nic" {
-					continue
-				}
-
-				// Skip NICs that specify a NIC type that is not the same as our own.
-				if !shared.StringInSlice(devConfig["nictype"], []string{"", "bridged"}) {
-					continue
-				}
-
-				// Skip our own device. This avoids triggering duplicate device errors during
-				// updates or when making temporary copies of our instance during migrations.
-				if instance.IsSameLogicalInstance(d.inst, &inst) && d.Name() == devName {
-					continue
-				}
-
-				// Skip NICs not connected to our NIC's managed network.
-				// If our NIC is connected to a managed network (either via network or parent keys)
-				// but the other NIC doesn't reference the same network name via either its network
-				// or parent keys then we can say it is connected to a different network, so the
-				// duplicate checks can be skipped.
-				if d.network != nil && !network.NICUsesNetwork(devConfig, &api.Network{Name: d.network.Name()}) {
-					continue
-				}
-
-				// Skip NICs that are connected to a managed network or different unmanaged parent
-				// when we are not connected to a managed network.
-				if d.network == nil && (devConfig["network"] != "" || d.config["parent"] != devConfig["parent"]) {
-					continue
-				}
-
-				// Skip NICs connected to other VLANs (not perfect though as one NIC could
-				// explicitly specify the default untagged VLAN and these would be connected to
-				// same L2 even though the values are different, and there is a different default
-				// value for native and openvswith parent bridges).
-				if d.config["vlan"] != devConfig["vlan"] {
-					continue
-				}
-
-				// Check NIC's MAC address doesn't match this NIC's MAC address.
-				devNICMAC, _ := net.ParseMAC(devConfig["hwaddr"])
-				if devNICMAC == nil {
-					devNICMAC, _ = net.ParseMAC(inst.Config[fmt.Sprintf("volatile.%s.hwaddr", devName)])
-				}
-
-				if ourNICMAC != nil && devNICMAC != nil && bytes.Compare(ourNICMAC, devNICMAC) == 0 {
-					return fmt.Errorf("MAC address %q already defined on another NIC", devNICMAC.String())
-				}
-
-				// Check NIC's static IPs don't match this NIC's static IPs.
-				for _, key := range []string{"ipv4.address", "ipv6.address"} {
-					if d.config[key] == "" {
-						continue // No static IP specified on this NIC.
-					}
-
-					// Parse IPs to avoid being tripped up by presentation differences.
-					devNICIP := net.ParseIP(devConfig[key])
-
-					if ourNICIPs[key] != nil && devNICIP != nil && ourNICIPs[key].Equal(devNICIP) {
-						return fmt.Errorf("IP address %q already defined on another NIC", devNICIP.String())
-					}
-				}
-			}
-
-			return nil
-		})
+		err := d.checkAddressConflict()
 		if err != nil {
 			return err
 		}
@@ -441,6 +351,101 @@ func (d *nicBridged) validateConfig(instConf instance.ConfigReader) error {
 	}
 
 	return nil
+}
+
+// checkAddressConflict checks for conflicting IP/MAC addresses on another NIC connected to same network on the
+// same cluster member. Can only validate this when the instance is supplied (and not doing profile validation).
+// Returns api.StatusError with status code set to http.StatusConflict if conflicting address found.
+func (d *nicBridged) checkAddressConflict() error {
+	node := d.inst.Location()
+	filter := cluster.InstanceFilter{
+		Node: &node, // Managed bridge networks have a per-server DHCP daemon.
+	}
+
+	ourNICIPs := make(map[string]net.IP, 2)
+	ourNICIPs["ipv4.address"] = net.ParseIP(d.config["ipv4.address"])
+	ourNICIPs["ipv6.address"] = net.ParseIP(d.config["ipv6.address"])
+
+	ourNICMAC, _ := net.ParseMAC(d.config["hwaddr"])
+	if ourNICMAC == nil {
+		ourNICMAC, _ = net.ParseMAC(d.volatileGet()["hwaddr"])
+	}
+
+	return d.state.DB.Cluster.InstanceList(&filter, func(inst db.InstanceArgs, p api.Project, profiles []api.Profile) error {
+		// Get the instance's effective network project name.
+		instNetworkProject := project.NetworkProjectFromRecord(&p)
+		if instNetworkProject != project.Default {
+			return nil // Managed bridge networks can only exist in default project.
+		}
+
+		// Iterate through each of the instance's devices, looking for NICs that are linked to
+		// the same network, on the same cluster member as this NIC and have matching static IPs.
+		for devName, devConfig := range db.ExpandInstanceDevices(inst.Devices.Clone(), profiles) {
+			if devConfig["type"] != "nic" {
+				continue
+			}
+
+			// Skip NICs that specify a NIC type that is not the same as our own.
+			if !shared.StringInSlice(devConfig["nictype"], []string{"", "bridged"}) {
+				continue
+			}
+
+			// Skip our own device. This avoids triggering duplicate device errors during
+			// updates or when making temporary copies of our instance during migrations.
+			if instance.IsSameLogicalInstance(d.inst, &inst) && d.Name() == devName {
+				continue
+			}
+
+			// Skip NICs not connected to our NIC's managed network.
+			// If our NIC is connected to a managed network (either via network or parent keys)
+			// but the other NIC doesn't reference the same network name via either its network
+			// or parent keys then we can say it is connected to a different network, so the
+			// duplicate checks can be skipped.
+			if d.network != nil && !network.NICUsesNetwork(devConfig, &api.Network{Name: d.network.Name()}) {
+				continue
+			}
+
+			// Skip NICs that are connected to a managed network or different unmanaged parent
+			// when we are not connected to a managed network.
+			if d.network == nil && (devConfig["network"] != "" || d.config["parent"] != devConfig["parent"]) {
+				continue
+			}
+
+			// Skip NICs connected to other VLANs (not perfect though as one NIC could
+			// explicitly specify the default untagged VLAN and these would be connected to
+			// same L2 even though the values are different, and there is a different default
+			// value for native and openvswith parent bridges).
+			if d.config["vlan"] != devConfig["vlan"] {
+				continue
+			}
+
+			// Check NIC's MAC address doesn't match this NIC's MAC address.
+			devNICMAC, _ := net.ParseMAC(devConfig["hwaddr"])
+			if devNICMAC == nil {
+				devNICMAC, _ = net.ParseMAC(inst.Config[fmt.Sprintf("volatile.%s.hwaddr", devName)])
+			}
+
+			if ourNICMAC != nil && devNICMAC != nil && bytes.Equal(ourNICMAC, devNICMAC) {
+				return api.StatusErrorf(http.StatusConflict, "MAC address %q already defined on another NIC", devNICMAC.String())
+			}
+
+			// Check NIC's static IPs don't match this NIC's static IPs.
+			for _, key := range []string{"ipv4.address", "ipv6.address"} {
+				if d.config[key] == "" {
+					continue // No static IP specified on this NIC.
+				}
+
+				// Parse IPs to avoid being tripped up by presentation differences.
+				devNICIP := net.ParseIP(devConfig[key])
+
+				if ourNICIPs[key] != nil && devNICIP != nil && ourNICIPs[key].Equal(devNICIP) {
+					return api.StatusErrorf(http.StatusConflict, "IP address %q already defined on another NIC", devNICIP.String())
+				}
+			}
+		}
+
+		return nil
+	})
 }
 
 // validateEnvironment checks the runtime environment for correctness.
@@ -533,7 +538,7 @@ func (d *nicBridged) Start() (*deviceConfig.RunConfig, error) {
 		return nil, err
 	}
 
-	revert.Add(func() { network.InterfaceRemove(saveData["host_name"]) })
+	revert.Add(func() { _ = network.InterfaceRemove(saveData["host_name"]) })
 
 	// Populate device config with volatile fields if needed.
 	networkVethFillFromVolatile(d.config, saveData)
@@ -574,7 +579,7 @@ func (d *nicBridged) Start() (*deviceConfig.RunConfig, error) {
 	if err != nil {
 		return nil, err
 	}
-	revert.Add(func() { network.DetachInterface(d.config["parent"], saveData["host_name"]) })
+	revert.Add(func() { _ = network.DetachInterface(d.config["parent"], saveData["host_name"]) })
 
 	// Attempt to disable router advertisement acceptance.
 	err = util.SysctlSet(fmt.Sprintf("net/ipv6/conf/%s/accept_ra", saveData["host_name"]), "0")
@@ -797,9 +802,11 @@ func (d *nicBridged) Stop() (*deviceConfig.RunConfig, error) {
 
 // postStop is run after the device is removed from the instance.
 func (d *nicBridged) postStop() error {
-	defer d.volatileSet(map[string]string{
-		"host_name": "",
-	})
+	defer func() {
+		_ = d.volatileSet(map[string]string{
+			"host_name": "",
+		})
+	}()
 
 	v := d.volatileGet()
 
@@ -926,6 +933,7 @@ func (d *nicBridged) rebuildDnsmasqEntry() error {
 }
 
 // setupHostFilters applies any host side network filters.
+// Returns a revert fail function that can be used to undo this function if a subsequent step fails.
 func (d *nicBridged) setupHostFilters(oldConfig deviceConfig.Device) (revert.Hook, error) {
 	revert := revert.New()
 	defer revert.Fail()
@@ -954,9 +962,9 @@ func (d *nicBridged) setupHostFilters(oldConfig deviceConfig.Device) (revert.Hoo
 		revert.Add(func() { d.removeFilters(d.config) })
 	}
 
-	revertExternal := revert.Clone()
+	cleanup := revert.Clone().Fail
 	revert.Success()
-	return revertExternal.Fail, nil
+	return cleanup, nil
 }
 
 // removeFilters removes any network level filters defined for the instance.
@@ -1242,7 +1250,7 @@ func (d *nicBridged) networkClearLease(name string, network string, hwaddr strin
 	if err != nil {
 		return err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	var dstDUID string
 	errs := []error{}
@@ -1319,7 +1327,7 @@ func (d *nicBridged) networkDHCPv4Release(srcMAC net.HardwareAddr, srcIP net.IP,
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	//Random DHCP transaction ID
 	xid := rand.Uint32()
@@ -1351,7 +1359,11 @@ func (d *nicBridged) networkDHCPv4Release(srcMAC net.HardwareAddr, srcIP net.IP,
 	}
 
 	_, err = conn.Write(buf.Bytes())
-	return err
+	if err != nil {
+		return err
+	}
+
+	return conn.Close()
 }
 
 // networkDHCPv6Release sends a DHCPv6 release packet to a DHCP server.
@@ -1364,7 +1376,7 @@ func (d *nicBridged) networkDHCPv6Release(srcDUID string, srcIAID string, srcIP 
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Construct a DHCPv6 packet pretending to be from the source IP and MAC supplied.
 	dhcp := layers.DHCPv6{
@@ -1413,7 +1425,10 @@ func (d *nicBridged) networkDHCPv6Release(srcDUID string, srcIAID string, srcIP 
 	}
 
 	_, err = conn.Write(buf.Bytes())
-	return err
+	if err != nil {
+		return err
+	}
+	return conn.Close()
 }
 
 // networkDHCPv6CreateIANA creates a DHCPv6 Identity Association for Non-temporary Address (rfc3315 IA_NA) option.

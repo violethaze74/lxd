@@ -8,9 +8,9 @@ import (
 
 	"github.com/pborman/uuid"
 
-	"github.com/gorilla/websocket"
 	"github.com/lxc/lxd/shared"
 	"github.com/lxc/lxd/shared/api"
+	"github.com/lxc/lxd/shared/cancel"
 )
 
 // DevLXDServer represents an instance of an devlxd event server.
@@ -34,16 +34,13 @@ func NewDevLXDServer(debug bool, verbose bool) *DevLXDServer {
 }
 
 // AddListener creates and returns a new event listener.
-func (s *DevLXDServer) AddListener(instanceID int, connection *websocket.Conn, messageTypes []string) (*DevLXDListener, error) {
-	ctx, ctxCancel := context.WithCancel(context.Background())
-
+func (s *DevLXDServer) AddListener(instanceID int, connection EventListenerConnection, messageTypes []string) (*DevLXDListener, error) {
 	listener := &DevLXDListener{
 		listenerCommon: listenerCommon{
-			Conn:         connection,
-			messageTypes: messageTypes,
-			ctx:          ctx,
-			ctxCancel:    ctxCancel,
-			id:           uuid.New(),
+			EventListenerConnection: connection,
+			messageTypes:            messageTypes,
+			done:                    cancel.New(context.Background()),
+			id:                      uuid.New(),
 		},
 		instanceID: instanceID,
 	}
@@ -57,7 +54,7 @@ func (s *DevLXDServer) AddListener(instanceID int, connection *websocket.Conn, m
 
 	s.listeners[listener.id] = listener
 
-	go listener.heartbeat()
+	go listener.start()
 
 	return listener, nil
 }
@@ -100,7 +97,6 @@ func (s *DevLXDServer) broadcast(instanceID int, event api.Event) error {
 				return
 			}
 
-			listener.SetWriteDeadline(time.Now().Add(5 * time.Second))
 			err := listener.WriteJSON(event)
 			if err != nil {
 				// Remove the listener from the list

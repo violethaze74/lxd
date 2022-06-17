@@ -176,7 +176,7 @@ func lxdDownloadImage(fingerprint string, uri string, userAgent string, client *
 	if err != nil {
 		return nil, err
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	defer close(doneCh)
 
 	if response.StatusCode != http.StatusOK {
@@ -409,7 +409,7 @@ func (r *ProtocolLXD) CreateImage(image api.ImagesPost, args *ImageCreateArgs) (
 		if err != nil {
 			return nil, err
 		}
-		defer os.Remove(tmpfile.Name())
+		defer func() { _ = os.Remove(tmpfile.Name()) }()
 
 		// Setup the multipart writer
 		w := multipart.NewWriter(tmpfile)
@@ -441,7 +441,10 @@ func (r *ProtocolLXD) CreateImage(image api.ImagesPost, args *ImageCreateArgs) (
 		}
 
 		// Done writing to multipart
-		w.Close()
+		err = w.Close()
+		if err != nil {
+			return nil, err
+		}
 
 		// Figure out the size of the whole thing
 		size, err := tmpfile.Seek(0, 2)
@@ -527,7 +530,7 @@ func (r *ProtocolLXD) CreateImage(image api.ImagesPost, args *ImageCreateArgs) (
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Handle errors
 	response, _, err := lxdParseResponse(resp)
@@ -574,9 +577,13 @@ func (r *ProtocolLXD) tryCopyImage(req api.ImagesPost, urls []string) (RemoteOpe
 				return
 			}
 
+			var errors []remoteOperationResult
+
 			// Get the operation data
 			op, err := rop.GetTarget()
 			if err != nil {
+				errors = append(errors, remoteOperationResult{Error: err})
+				rop.err = remoteOperationError("Failed to get operation data", errors)
 				return
 			}
 
@@ -589,7 +596,12 @@ func (r *ProtocolLXD) tryCopyImage(req api.ImagesPost, urls []string) (RemoteOpe
 				alias.Name = entry.Name
 				alias.Target = fingerprint
 
-				r.CreateImageAlias(alias)
+				err := r.CreateImageAlias(alias)
+				if err != nil {
+					errors = append(errors, remoteOperationResult{Error: err})
+					rop.err = remoteOperationError("Failed to create image alias", errors)
+					return
+				}
 			}
 		}()
 	}
@@ -612,7 +624,7 @@ func (r *ProtocolLXD) tryCopyImage(req api.ImagesPost, urls []string) (RemoteOpe
 			rop.handlerLock.Unlock()
 
 			for _, handler := range rop.handlers {
-				rop.targetOp.AddHandler(handler)
+				_, _ = rop.targetOp.AddHandler(handler)
 			}
 
 			err = rop.targetOp.Wait()
@@ -647,10 +659,17 @@ func (r *ProtocolLXD) CopyImage(source ImageServer, image api.Image, args *Image
 		return nil, fmt.Errorf("The source and target servers must be different")
 	}
 
-	if image.Profiles != nil {
+	// Handle profile list overrides.
+	if args.Profiles != nil {
 		if !r.HasExtension("image_copy_profile") {
 			return nil, fmt.Errorf("The server is missing the required \"image_copy_profile\" API extension")
 		}
+
+		image.Profiles = args.Profiles
+	} else {
+		// If profiles aren't provided, clear the list on the source to
+		// avoid requiring the destination to have them all.
+		image.Profiles = nil
 	}
 
 	// Get source server connection information
@@ -707,7 +726,7 @@ func (r *ProtocolLXD) CopyImage(source ImageServer, image api.Image, args *Image
 
 		exportOp, err := source.ExportImage(image.Fingerprint, req)
 		if err != nil {
-			tokenOp.Cancel()
+			_ = tokenOp.Cancel()
 			return nil, err
 		}
 
@@ -719,7 +738,7 @@ func (r *ProtocolLXD) CopyImage(source ImageServer, image api.Image, args *Image
 		// Forward targetOp to remote op
 		go func() {
 			rop.err = rop.targetOp.Wait()
-			tokenOp.Cancel()
+			_ = tokenOp.Cancel()
 			close(rop.chDone)
 		}()
 
@@ -732,13 +751,15 @@ func (r *ProtocolLXD) CopyImage(source ImageServer, image api.Image, args *Image
 		if err != nil {
 			return nil, err
 		}
-		defer os.Remove(metaFile.Name())
+
+		defer func() { _ = os.Remove(metaFile.Name()) }()
 
 		rootfsFile, err := ioutil.TempFile("", "lxc_image_")
 		if err != nil {
 			return nil, err
 		}
-		defer os.Remove(rootfsFile.Name())
+
+		defer func() { _ = os.Remove(rootfsFile.Name()) }()
 
 		// Import image
 		req := ImageFileRequest{
@@ -803,7 +824,7 @@ func (r *ProtocolLXD) CopyImage(source ImageServer, image api.Image, args *Image
 			rop.handlerLock.Unlock()
 
 			for _, handler := range rop.handlers {
-				rop.targetOp.AddHandler(handler)
+				_, _ = rop.targetOp.AddHandler(handler)
 			}
 
 			err = rop.targetOp.Wait()

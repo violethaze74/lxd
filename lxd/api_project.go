@@ -14,7 +14,8 @@ import (
 	"github.com/gorilla/mux"
 
 	"github.com/lxc/lxd/lxd/db"
-	dbCluster "github.com/lxc/lxd/lxd/db/cluster"
+	"github.com/lxc/lxd/lxd/db/cluster"
+	"github.com/lxc/lxd/lxd/db/operationtype"
 	"github.com/lxc/lxd/lxd/lifecycle"
 	"github.com/lxc/lxd/lxd/network"
 	"github.com/lxc/lxd/lxd/operations"
@@ -148,8 +149,8 @@ func projectsGet(d *Daemon, r *http.Request) response.Response {
 
 	var result any
 	err := d.db.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
-		filter := dbCluster.ProjectFilter{}
-		projects, err := dbCluster.GetProjects(ctx, tx.Tx(), filter)
+		filter := cluster.ProjectFilter{}
+		projects, err := cluster.GetProjects(ctx, tx.Tx(), filter)
 		if err != nil {
 			return err
 		}
@@ -165,7 +166,7 @@ func projectsGet(d *Daemon, r *http.Request) response.Response {
 				return err
 			}
 
-			apiProject.UsedBy, err = projectUsedBy(tx, &project)
+			apiProject.UsedBy, err = projectUsedBy(ctx, tx, &project)
 			if err != nil {
 				return err
 			}
@@ -195,20 +196,36 @@ func projectsGet(d *Daemon, r *http.Request) response.Response {
 
 // projectUsedBy returns a list of URLs for all instances, images, profiles,
 // storage volumes, networks, and acls that use this project.
-func projectUsedBy(tx *db.ClusterTx, project *dbCluster.Project) ([]string, error) {
-	instances, err := tx.GetInstanceURIs(db.InstanceFilter{Project: &project.Name})
+func projectUsedBy(ctx context.Context, tx *db.ClusterTx, project *cluster.Project) ([]string, error) {
+	usedBy := []string{}
+	instances, err := cluster.GetInstances(ctx, tx.Tx(), cluster.InstanceFilter{Project: &project.Name})
 	if err != nil {
 		return nil, err
 	}
 
-	images, err := tx.GetImageURIs(db.ImageFilter{Project: &project.Name})
+	profiles, err := cluster.GetProfiles(ctx, tx.Tx(), cluster.ProfileFilter{Project: &project.Name})
 	if err != nil {
 		return nil, err
 	}
 
-	profiles, err := tx.GetProfileURIs(db.ProfileFilter{Project: &project.Name})
+	images, err := cluster.GetImages(ctx, tx.Tx(), cluster.ImageFilter{Project: &project.Name})
 	if err != nil {
 		return nil, err
+	}
+
+	for _, instance := range instances {
+		apiInstance := api.Instance{Name: instance.Name}
+		usedBy = append(usedBy, apiInstance.URL(version.Version, project.Name).String())
+	}
+
+	for _, profile := range profiles {
+		apiProfile := api.Profile{Name: profile.Name}
+		usedBy = append(usedBy, apiProfile.URL(version.APIVersion, project.Name).String())
+	}
+
+	for _, image := range images {
+		apiImage := api.Image{Fingerprint: image.Fingerprint}
+		usedBy = append(usedBy, apiImage.URL(version.APIVersion, project.Name).String())
 	}
 
 	volumes, err := tx.GetStorageVolumeURIs(project.Name)
@@ -226,9 +243,6 @@ func projectUsedBy(tx *db.ClusterTx, project *dbCluster.Project) ([]string, erro
 		return nil, err
 	}
 
-	usedBy := instances
-	usedBy = append(usedBy, images...)
-	usedBy = append(usedBy, profiles...)
 	usedBy = append(usedBy, volumes...)
 	usedBy = append(usedBy, networks...)
 	usedBy = append(usedBy, acls...)
@@ -298,12 +312,12 @@ func projectsPost(d *Daemon, r *http.Request) response.Response {
 
 	var id int64
 	err = d.db.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
-		id, err = dbCluster.CreateProject(ctx, tx.Tx(), dbCluster.Project{Description: project.Description, Name: project.Name})
+		id, err = cluster.CreateProject(ctx, tx.Tx(), cluster.Project{Description: project.Description, Name: project.Name})
 		if err != nil {
 			return fmt.Errorf("Failed adding database record: %w", err)
 		}
 
-		err = dbCluster.CreateProjectConfig(ctx, tx.Tx(), id, project.Config)
+		err = cluster.CreateProjectConfig(ctx, tx.Tx(), id, project.Config)
 		if err != nil {
 			return fmt.Errorf("Unable to create project config for project %q: %w", project.Name, err)
 		}
@@ -315,7 +329,7 @@ func projectsPost(d *Daemon, r *http.Request) response.Response {
 			}
 
 			if project.Config["features.images"] == "false" {
-				err = dbCluster.InitProjectWithoutImages(ctx, tx.Tx(), project.Name)
+				err = cluster.InitProjectWithoutImages(ctx, tx.Tx(), project.Name)
 				if err != nil {
 					return err
 				}
@@ -344,12 +358,12 @@ func projectsPost(d *Daemon, r *http.Request) response.Response {
 // Create the default profile of a project.
 func projectCreateDefaultProfile(tx *db.ClusterTx, project string) error {
 	// Create a default profile
-	profile := db.Profile{}
+	profile := cluster.Profile{}
 	profile.Project = project
 	profile.Name = projecthelpers.Default
 	profile.Description = fmt.Sprintf("Default LXD profile for project %s", project)
 
-	_, err := tx.CreateProfile(profile)
+	_, err := cluster.CreateProfile(context.TODO(), tx.Tx(), profile)
 	if err != nil {
 		return fmt.Errorf("Add default profile to database: %w", err)
 	}
@@ -404,7 +418,7 @@ func projectGet(d *Daemon, r *http.Request) response.Response {
 	// Get the database entry
 	var project *api.Project
 	err = d.db.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
-		dbProject, err := dbCluster.GetProject(ctx, tx.Tx(), name)
+		dbProject, err := cluster.GetProject(ctx, tx.Tx(), name)
 		if err != nil {
 			return err
 		}
@@ -414,7 +428,7 @@ func projectGet(d *Daemon, r *http.Request) response.Response {
 			return err
 		}
 
-		project.UsedBy, err = projectUsedBy(tx, dbProject)
+		project.UsedBy, err = projectUsedBy(ctx, tx, dbProject)
 		return err
 	})
 	if err != nil {
@@ -472,7 +486,7 @@ func projectPut(d *Daemon, r *http.Request) response.Response {
 	// Get the current data
 	var project *api.Project
 	err = d.db.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
-		dbProject, err := dbCluster.GetProject(ctx, tx.Tx(), name)
+		dbProject, err := cluster.GetProject(ctx, tx.Tx(), name)
 		if err != nil {
 			return err
 		}
@@ -482,7 +496,7 @@ func projectPut(d *Daemon, r *http.Request) response.Response {
 			return err
 		}
 
-		project.UsedBy, err = projectUsedBy(tx, dbProject)
+		project.UsedBy, err = projectUsedBy(ctx, tx, dbProject)
 		if err != nil {
 			return err
 		}
@@ -560,7 +574,7 @@ func projectPatch(d *Daemon, r *http.Request) response.Response {
 	// Get the current data
 	var project *api.Project
 	err = d.db.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
-		dbProject, err := dbCluster.GetProject(ctx, tx.Tx(), name)
+		dbProject, err := cluster.GetProject(ctx, tx.Tx(), name)
 		if err != nil {
 			return err
 		}
@@ -570,7 +584,7 @@ func projectPatch(d *Daemon, r *http.Request) response.Response {
 			return err
 		}
 
-		project.UsedBy, err = projectUsedBy(tx, dbProject)
+		project.UsedBy, err = projectUsedBy(ctx, tx, dbProject)
 		if err != nil {
 			return err
 		}
@@ -684,7 +698,7 @@ func projectChange(d *Daemon, project *api.Project, req api.ProjectPut) response
 			return err
 		}
 
-		err = dbCluster.UpdateProject(context.Background(), tx.Tx(), project.Name, req)
+		err = cluster.UpdateProject(context.TODO(), tx.Tx(), project.Name, req)
 		if err != nil {
 			return fmt.Errorf("Persist profile changes: %w", err)
 		}
@@ -697,7 +711,7 @@ func projectChange(d *Daemon, project *api.Project, req api.ProjectPut) response
 				}
 			} else {
 				// Delete the project-specific default profile.
-				err = tx.DeleteProfile(project.Name, projecthelpers.Default)
+				err = cluster.DeleteProfile(context.TODO(), tx.Tx(), project.Name, projecthelpers.Default)
 				if err != nil {
 					return fmt.Errorf("Delete project default profile: %w", err)
 				}
@@ -764,7 +778,7 @@ func projectPost(d *Daemon, r *http.Request) response.Response {
 	run := func(op *operations.Operation) error {
 		var id int64
 		err := d.db.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
-			project, err := dbCluster.GetProject(ctx, tx.Tx(), req.Name)
+			project, err := cluster.GetProject(ctx, tx.Tx(), req.Name)
 			if err != nil && !response.IsNotFoundError(err) {
 				return fmt.Errorf("Failed checking if project %q exists: %w", req.Name, err)
 			}
@@ -773,12 +787,12 @@ func projectPost(d *Daemon, r *http.Request) response.Response {
 				return fmt.Errorf("A project named %q already exists", req.Name)
 			}
 
-			project, err = dbCluster.GetProject(ctx, tx.Tx(), name)
+			project, err = cluster.GetProject(ctx, tx.Tx(), name)
 			if err != nil {
 				return fmt.Errorf("Failed loading project %q: %w", name, err)
 			}
 
-			empty, err := projectIsEmpty(project, tx)
+			empty, err := projectIsEmpty(ctx, project, tx)
 			if err != nil {
 				return err
 			}
@@ -787,7 +801,7 @@ func projectPost(d *Daemon, r *http.Request) response.Response {
 				return fmt.Errorf("Only empty projects can be renamed")
 			}
 
-			id, err = dbCluster.GetProjectID(ctx, tx.Tx(), name)
+			id, err = cluster.GetProjectID(ctx, tx.Tx(), name)
 			if err != nil {
 				return fmt.Errorf("Failed getting project ID for project %q: %w", name, err)
 			}
@@ -797,7 +811,7 @@ func projectPost(d *Daemon, r *http.Request) response.Response {
 				return err
 			}
 
-			return dbCluster.RenameProject(ctx, tx.Tx(), name, req.Name)
+			return cluster.RenameProject(ctx, tx.Tx(), name, req.Name)
 		})
 		if err != nil {
 			return err
@@ -816,7 +830,7 @@ func projectPost(d *Daemon, r *http.Request) response.Response {
 		return nil
 	}
 
-	op, err := operations.OperationCreate(d.State(), "", operations.OperationClassTask, db.OperationProjectRename, nil, nil, run, nil, nil, r)
+	op, err := operations.OperationCreate(d.State(), "", operations.OperationClassTask, operationtype.ProjectRename, nil, nil, run, nil, nil, r)
 	if err != nil {
 		return response.InternalError(err)
 	}
@@ -855,12 +869,12 @@ func projectDelete(d *Daemon, r *http.Request) response.Response {
 
 	var id int64
 	err = d.db.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
-		project, err := dbCluster.GetProject(ctx, tx.Tx(), name)
+		project, err := cluster.GetProject(ctx, tx.Tx(), name)
 		if err != nil {
 			return fmt.Errorf("Fetch project %q: %w", name, err)
 		}
 
-		empty, err := projectIsEmpty(project, tx)
+		empty, err := projectIsEmpty(ctx, project, tx)
 		if err != nil {
 			return err
 		}
@@ -869,12 +883,12 @@ func projectDelete(d *Daemon, r *http.Request) response.Response {
 			return fmt.Errorf("Only empty projects can be removed")
 		}
 
-		id, err = dbCluster.GetProjectID(ctx, tx.Tx(), name)
+		id, err = cluster.GetProjectID(ctx, tx.Tx(), name)
 		if err != nil {
 			return fmt.Errorf("Fetch project id %q: %w", name, err)
 		}
 
-		return dbCluster.DeleteProject(ctx, tx.Tx(), name)
+		return cluster.DeleteProject(ctx, tx.Tx(), name)
 	})
 
 	if err != nil {
@@ -960,8 +974,8 @@ func projectStateGet(d *Daemon, r *http.Request) response.Response {
 }
 
 // Check if a project is empty.
-func projectIsEmpty(project *dbCluster.Project, tx *db.ClusterTx) (bool, error) {
-	instances, err := tx.GetInstanceURIs(db.InstanceFilter{Project: &project.Name})
+func projectIsEmpty(ctx context.Context, project *cluster.Project, tx *db.ClusterTx) (bool, error) {
+	instances, err := cluster.GetInstances(ctx, tx.Tx(), cluster.InstanceFilter{Project: &project.Name})
 	if err != nil {
 		return false, err
 	}
@@ -970,7 +984,7 @@ func projectIsEmpty(project *dbCluster.Project, tx *db.ClusterTx) (bool, error) 
 		return false, nil
 	}
 
-	images, err := tx.GetImageURIs(db.ImageFilter{Project: &project.Name})
+	images, err := cluster.GetImages(ctx, tx.Tx(), cluster.ImageFilter{Project: &project.Name})
 	if err != nil {
 		return false, err
 	}
@@ -979,14 +993,14 @@ func projectIsEmpty(project *dbCluster.Project, tx *db.ClusterTx) (bool, error) 
 		return false, nil
 	}
 
-	profiles, err := tx.GetProfileURIs(db.ProfileFilter{Project: &project.Name})
+	profiles, err := cluster.GetProfiles(ctx, tx.Tx(), cluster.ProfileFilter{Project: &project.Name})
 	if err != nil {
 		return false, err
 	}
 
 	if len(profiles) > 0 {
 		// Consider the project empty if it is only used by the default profile.
-		if len(profiles) == 1 && strings.Contains(profiles[0], "/profiles/default") {
+		if len(profiles) == 1 && profiles[0].Name == "default" {
 			return true, nil
 		}
 

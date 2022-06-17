@@ -21,6 +21,7 @@ import (
 	"github.com/lxc/lxd/lxd/archive"
 	"github.com/lxc/lxd/lxd/backup"
 	"github.com/lxc/lxd/lxd/db"
+	"github.com/lxc/lxd/lxd/db/operationtype"
 	"github.com/lxc/lxd/lxd/filter"
 	"github.com/lxc/lxd/lxd/instance"
 	"github.com/lxc/lxd/lxd/operations"
@@ -220,9 +221,7 @@ func storagePoolVolumesGet(d *Daemon, r *http.Request) response.Response {
 		return response.SmartError(err)
 	}
 
-	for _, volume := range custVolumes {
-		volumes = append(volumes, volume)
-	}
+	volumes = append(volumes, custVolumes...)
 
 	// We exclude volumes of type image, since those are special: they are stored using the storage_volumes
 	// table, but are effectively a cache which is not tied to projects, so we always link the to the default
@@ -643,7 +642,7 @@ func doCustomVolumeRefresh(d *Daemon, r *http.Request, requestProjectName string
 		return nil
 	}
 
-	op, err := operations.OperationCreate(d.State(), requestProjectName, operations.OperationClassTask, db.OperationVolumeCopy, nil, nil, run, nil, nil, r)
+	op, err := operations.OperationCreate(d.State(), requestProjectName, operations.OperationClassTask, operationtype.VolumeCopy, nil, nil, run, nil, nil, r)
 	if err != nil {
 		return response.InternalError(err)
 	}
@@ -691,7 +690,7 @@ func doVolumeCreateOrCopy(d *Daemon, r *http.Request, requestProjectName string,
 	}
 
 	// Volume copy operations potentially take a long time, so run as an async operation.
-	op, err := operations.OperationCreate(d.State(), requestProjectName, operations.OperationClassTask, db.OperationVolumeCopy, nil, nil, run, nil, nil, r)
+	op, err := operations.OperationCreate(d.State(), requestProjectName, operations.OperationClassTask, operationtype.VolumeCopy, nil, nil, run, nil, nil, r)
 	if err != nil {
 		return response.InternalError(err)
 	}
@@ -880,12 +879,12 @@ func doVolumeMigration(d *Daemon, r *http.Request, requestProjectName string, pr
 
 	var op *operations.Operation
 	if push {
-		op, err = operations.OperationCreate(d.State(), requestProjectName, operations.OperationClassWebsocket, db.OperationVolumeCreate, resources, sink.Metadata(), run, nil, sink.Connect, r)
+		op, err = operations.OperationCreate(d.State(), requestProjectName, operations.OperationClassWebsocket, operationtype.VolumeCreate, resources, sink.Metadata(), run, nil, sink.Connect, r)
 		if err != nil {
 			return response.InternalError(err)
 		}
 	} else {
-		op, err = operations.OperationCreate(d.State(), requestProjectName, operations.OperationClassTask, db.OperationVolumeCopy, resources, nil, run, nil, nil, r)
+		op, err = operations.OperationCreate(d.State(), requestProjectName, operations.OperationClassTask, operationtype.VolumeCopy, resources, nil, run, nil, nil, r)
 		if err != nil {
 			return response.InternalError(err)
 		}
@@ -1070,8 +1069,8 @@ func storagePoolVolumePost(d *Daemon, r *http.Request) response.Response {
 	}
 
 	// Check if a running instance is using it.
-	err = storagePools.VolumeUsedByInstanceDevices(d.State(), srcPoolName, projectName, vol, true, func(dbInst db.Instance, project api.Project, profiles []api.Profile, usedByDevices []string) error {
-		inst, err := instance.Load(d.State(), db.InstanceToArgs(&dbInst), profiles)
+	err = storagePools.VolumeUsedByInstanceDevices(d.State(), srcPoolName, projectName, vol, true, func(dbInst db.InstanceArgs, project api.Project, profiles []api.Profile, usedByDevices []string) error {
+		inst, err := instance.Load(d.State(), dbInst, profiles)
 		if err != nil {
 			return err
 		}
@@ -1116,7 +1115,7 @@ func storagePoolVolumeTypePostMigration(state *state.State, r *http.Request, req
 			return response.InternalError(err)
 		}
 
-		op, err := operations.OperationCreate(state, requestProjectName, operations.OperationClassTask, db.OperationVolumeMigrate, resources, nil, run, nil, nil, r)
+		op, err := operations.OperationCreate(state, requestProjectName, operations.OperationClassTask, operationtype.VolumeMigrate, resources, nil, run, nil, nil, r)
 		if err != nil {
 			return response.InternalError(err)
 		}
@@ -1125,7 +1124,7 @@ func storagePoolVolumeTypePostMigration(state *state.State, r *http.Request, req
 	}
 
 	// Pull mode
-	op, err := operations.OperationCreate(state, requestProjectName, operations.OperationClassWebsocket, db.OperationVolumeMigrate, resources, ws.Metadata(), run, nil, ws.Connect, r)
+	op, err := operations.OperationCreate(state, requestProjectName, operations.OperationClassWebsocket, operationtype.VolumeMigrate, resources, ws.Metadata(), run, nil, ws.Connect, r)
 	if err != nil {
 		return response.InternalError(err)
 	}
@@ -1189,7 +1188,7 @@ func storagePoolVolumeTypePostMove(d *Daemon, r *http.Request, poolName string, 
 		if err != nil {
 			return err
 		}
-		revert.Add(func() { storagePoolVolumeUpdateUsers(d, projectName, newPool.Name(), &newVol, pool.Name(), vol) })
+		revert.Add(func() { _ = storagePoolVolumeUpdateUsers(d, projectName, newPool.Name(), &newVol, pool.Name(), vol) })
 
 		// Provide empty description and nil config to instruct CreateCustomVolumeFromCopy to copy it
 		// from source volume.
@@ -1207,7 +1206,7 @@ func storagePoolVolumeTypePostMove(d *Daemon, r *http.Request, poolName string, 
 		return nil
 	}
 
-	op, err := operations.OperationCreate(d.State(), requestProjectName, operations.OperationClassTask, db.OperationVolumeMove, nil, nil, run, nil, nil, r)
+	op, err := operations.OperationCreate(d.State(), requestProjectName, operations.OperationClassTask, operationtype.VolumeMove, nil, nil, run, nil, nil, r)
 	if err != nil {
 		return response.InternalError(err)
 	}
@@ -1780,8 +1779,8 @@ func createStoragePoolVolumeFromBackup(d *Daemon, r *http.Request, requestProjec
 	if err != nil {
 		return response.InternalError(err)
 	}
-	defer os.Remove(backupFile.Name())
-	revert.Add(func() { backupFile.Close() })
+	defer func() { _ = os.Remove(backupFile.Name()) }()
+	revert.Add(func() { _ = backupFile.Close() })
 
 	// Stream uploaded backup data into temporary file.
 	_, err = io.Copy(backupFile, data)
@@ -1790,7 +1789,10 @@ func createStoragePoolVolumeFromBackup(d *Daemon, r *http.Request, requestProjec
 	}
 
 	// Detect squashfs compression and convert to tarball.
-	backupFile.Seek(0, 0)
+	_, err = backupFile.Seek(0, 0)
+	if err != nil {
+		return response.InternalError(err)
+	}
 	_, algo, decomArgs, err := shared.DetectCompressionFile(backupFile)
 	if err != nil {
 		return response.InternalError(err)
@@ -1805,7 +1807,7 @@ func createStoragePoolVolumeFromBackup(d *Daemon, r *http.Request, requestProjec
 		if err != nil {
 			return response.InternalError(err)
 		}
-		defer os.Remove(tarFile.Name())
+		defer func() { _ = os.Remove(tarFile.Name()) }()
 
 		// Decompress to tarFile temporary file.
 		err = archive.ExtractWithFds(decomArgs[0], decomArgs[1:], nil, nil, d.State().OS, tarFile)
@@ -1814,15 +1816,19 @@ func createStoragePoolVolumeFromBackup(d *Daemon, r *http.Request, requestProjec
 		}
 
 		// We don't need the original squashfs file anymore.
-		backupFile.Close()
-		os.Remove(backupFile.Name())
+		_ = backupFile.Close()
+		_ = os.Remove(backupFile.Name())
 
 		// Replace the backup file handle with the handle to the tar file.
 		backupFile = tarFile
 	}
 
 	// Parse the backup information.
-	backupFile.Seek(0, 0)
+	_, err = backupFile.Seek(0, 0)
+	if err != nil {
+		return response.InternalError(err)
+	}
+
 	logger.Debug("Reading backup file info")
 	bInfo, err := backup.GetInfo(backupFile, d.State().OS, backupFile.Name())
 	if err != nil {
@@ -1881,7 +1887,7 @@ func createStoragePoolVolumeFromBackup(d *Daemon, r *http.Request, requestProjec
 	runRevert := revert.Clone()
 
 	run := func(op *operations.Operation) error {
-		defer backupFile.Close()
+		defer func() { _ = backupFile.Close() }()
 		defer runRevert.Fail()
 
 		pool, err := storagePools.LoadByName(d.State(), bInfo.Pool)
@@ -1907,7 +1913,7 @@ func createStoragePoolVolumeFromBackup(d *Daemon, r *http.Request, requestProjec
 	resources := map[string][]string{}
 	resources["storage_volumes"] = []string{bInfo.Name}
 
-	op, err := operations.OperationCreate(d.State(), requestProjectName, operations.OperationClassTask, db.OperationCustomVolumeBackupRestore, resources, nil, run, nil, nil, r)
+	op, err := operations.OperationCreate(d.State(), requestProjectName, operations.OperationClassTask, operationtype.CustomVolumeBackupRestore, resources, nil, run, nil, nil, r)
 	if err != nil {
 		return response.InternalError(err)
 	}

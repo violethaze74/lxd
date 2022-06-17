@@ -9,11 +9,17 @@ import (
 	"github.com/lxc/lxd/shared/logger"
 )
 
-// TimeoutSeconds number of seconds that the operation lock will be kept for without calling Reset().
-const TimeoutSeconds = 30
+// TimeoutDefault timeout the operation lock will be kept alive for without needing to call Reset().
+const TimeoutDefault time.Duration = time.Second * time.Duration(30)
+
+// TimeoutShutdown timeout that can be used when shutting down an instance.
+const TimeoutShutdown time.Duration = time.Minute * time.Duration(5)
 
 // Action indicates the operation action type.
 type Action string
+
+// ActionCreate for creating an instance.
+const ActionCreate Action = "create"
 
 // ActionStart for starting an instance.
 const ActionStart Action = "start"
@@ -41,7 +47,7 @@ var instanceOperations = make(map[string]*InstanceOperation)
 type InstanceOperation struct {
 	action       Action
 	chanDone     chan error
-	chanReset    chan struct{}
+	chanReset    chan time.Duration
 	err          error
 	projectName  string
 	instanceName string
@@ -49,9 +55,9 @@ type InstanceOperation struct {
 }
 
 // Create creates a new operation lock for an Instance if one does not already exist and returns it.
-// The lock will be released after TimeoutSeconds or when Done() is called, which ever occurs first.
+// The lock will be released after TimeoutDefault or when Done() is called, which ever occurs first.
 // If createReusuable is set as true then future lock attempts can specify the reuseExisting argument as true
-// which will then trigger a reset of the timeout to TimeoutSeconds on the existing lock and return it.
+// which will then trigger a reset of the timeout to TimeoutDefault on the existing lock and return it.
 func Create(projectName string, instanceName string, action Action, createReusuable bool, reuseExisting bool) (*InstanceOperation, error) {
 	if projectName == "" || instanceName == "" {
 		return nil, fmt.Errorf("Invalid project or instance name")
@@ -66,7 +72,7 @@ func Create(projectName string, instanceName string, action Action, createReusua
 	if op != nil {
 		if op.reusable && reuseExisting {
 			// Reset operation timeout without releasing lock or deadlocking using Reset() function.
-			op.chanReset <- struct{}{}
+			op.chanReset <- TimeoutDefault
 			logger.Debug("Instance operation lock reused", logger.Ctx{"project": op.projectName, "instance": op.instanceName, "action": op.action, "reusable": op.reusable})
 
 			return op, nil
@@ -80,21 +86,30 @@ func Create(projectName string, instanceName string, action Action, createReusua
 	op.instanceName = instanceName
 	op.action = action
 	op.reusable = createReusuable
-	op.chanDone = make(chan error, 0)
-	op.chanReset = make(chan struct{}, 0)
+	op.chanDone = make(chan error)
+	op.chanReset = make(chan time.Duration)
 
 	instanceOperations[opKey] = op
 	logger.Debug("Instance operation lock created", logger.Ctx{"project": op.projectName, "instance": op.instanceName, "action": op.action, "reusable": op.reusable})
 
 	go func(op *InstanceOperation) {
+		timeout := TimeoutDefault
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+
 		for {
 			select {
 			case <-op.chanDone:
 				return
-			case <-op.chanReset:
+			case timeout = <-op.chanReset:
+				if !timer.Stop() {
+					<-timer.C
+				}
+
+				timer.Reset(timeout)
 				continue
-			case <-time.After(time.Second * TimeoutSeconds):
-				op.Done(fmt.Errorf("Instance %q operation timed out after %d seconds", op.action, TimeoutSeconds))
+			case <-timer.C:
+				op.Done(fmt.Errorf("Instance %q operation timed out after %v", op.action, timeout))
 				return
 			}
 		}
@@ -178,8 +193,13 @@ func (op *InstanceOperation) ActionMatch(matchActions ...Action) bool {
 	return false
 }
 
-// Reset resets the operation timeout to give another TimeoutSeconds seconds until it expires.
+// Reset resets the operation using TimeoutDefault until it expires.
 func (op *InstanceOperation) Reset() error {
+	return op.ResetTimeout(TimeoutDefault)
+}
+
+// ResetTimeout resets the operation using a custom timeout until it expires.
+func (op *InstanceOperation) ResetTimeout(timeout time.Duration) error {
 	// This function can be called on a nil struct.
 	if op == nil {
 		return nil
@@ -196,7 +216,7 @@ func (op *InstanceOperation) Reset() error {
 		return fmt.Errorf("Operation is already done or expired")
 	}
 
-	op.chanReset <- struct{}{}
+	op.chanReset <- timeout
 	return nil
 }
 

@@ -127,7 +127,7 @@ Unless specified through a prefix, all volume operations affect "custom" (user c
 
 	// Workaround for subcommand usage errors. See: https://github.com/spf13/cobra/issues/706
 	cmd.Args = cobra.NoArgs
-	cmd.Run = func(cmd *cobra.Command, args []string) { cmd.Usage() }
+	cmd.Run = func(cmd *cobra.Command, args []string) { _ = cmd.Usage() }
 	return cmd
 }
 
@@ -325,7 +325,7 @@ type cmdStorageVolumeCopy struct {
 
 func (c *cmdStorageVolumeCopy) Command() *cobra.Command {
 	cmd := &cobra.Command{}
-	cmd.Use = usage("copy", i18n.G("<pool>/<volume>[/<snapshot>] <pool>/<volume>"))
+	cmd.Use = usage("copy", i18n.G("[<remote>:]<pool>/<volume>[/<snapshot>] [<remote>:]<pool>/<volume>"))
 	cmd.Aliases = []string{"cp"}
 	cmd.Short = i18n.G("Copy storage volumes")
 	cmd.Long = cli.FormatSection(i18n.G("Description"), i18n.G(
@@ -406,23 +406,24 @@ func (c *cmdStorageVolumeCopy) Run(cmd *cobra.Command, args []string) error {
 
 	var srcVol *api.StorageVolume
 
-	// Check if requested storage volume exists
-	isSnapshot := shared.IsSnapshot(srcVolName)
+	// Check if requested storage volume exists.
+	srcVolParentName, srcVolSnapName, srcIsSnapshot := shared.InstanceGetParentAndSnapshotName(srcVolName)
+	srcVol, _, err = srcServer.GetStoragePoolVolume(srcVolPool, "custom", srcVolParentName)
+	if err != nil {
+		return err
+	}
 
-	if isSnapshot {
-		fields := strings.SplitN(srcVolName, "/", 2)
-		_, _, err = srcServer.GetStoragePoolVolumeSnapshot(srcVolPool,
-			"custom", fields[0], fields[1])
+	// If source is a snapshot get source snapshot volume info and apply to the srcVol.
+	if srcIsSnapshot {
+		srcVolSnapshot, _, err := srcServer.GetStoragePoolVolumeSnapshot(srcVolPool, "custom", srcVolParentName, srcVolSnapName)
 		if err != nil {
 			return err
 		}
 
-		srcVol, _, err = srcServer.GetStoragePoolVolume(srcVolPool, "custom", fields[0])
-	} else {
-		srcVol, _, err = srcServer.GetStoragePoolVolume(srcVolPool, "custom", srcVolName)
-	}
-	if err != nil {
-		return err
+		// Copy info from source snapshot into source volume used for new volume.
+		srcVol.Name = srcVolName
+		srcVol.Config = srcVolSnapshot.Config
+		srcVol.Description = srcVolSnapshot.Description
 	}
 
 	// If destination target was specified, copy the volume onto the given member.
@@ -445,10 +446,6 @@ func (c *cmdStorageVolumeCopy) Run(cmd *cobra.Command, args []string) error {
 		args.VolumeOnly = false
 		args.Project = c.flagTargetProject
 
-		if isSnapshot {
-			srcVol.Name = srcVolName
-		}
-
 		op, err = dstServer.MoveStoragePoolVolume(dstVolPool, srcServer, srcVolPool, *srcVol, args)
 		if err != nil {
 			return err
@@ -462,10 +459,6 @@ func (c *cmdStorageVolumeCopy) Run(cmd *cobra.Command, args []string) error {
 
 		if c.flagTargetProject != "" {
 			dstServer = dstServer.UseProject(c.flagTargetProject)
-		}
-
-		if isSnapshot {
-			srcVol.Name = srcVolName
 		}
 
 		op, err = dstServer.CopyStoragePoolVolume(dstVolPool, srcServer, srcVolPool, *srcVol, args)
@@ -494,10 +487,15 @@ func (c *cmdStorageVolumeCopy) Run(cmd *cobra.Command, args []string) error {
 	}
 
 	if cmd.Name() == "move" && srcServer != dstServer {
-		err := srcServer.DeleteStoragePoolVolume(srcVolPool, srcVol.Type, srcVolName)
+		if srcIsSnapshot {
+			_, err = srcServer.DeleteStoragePoolVolumeSnapshot(srcVolPool, srcVol.Type, srcVolParentName, srcVolSnapName)
+		} else {
+			err = srcServer.DeleteStoragePoolVolume(srcVolPool, srcVol.Type, srcVolName)
+		}
+
 		if err != nil {
 			progress.Done("")
-			return err
+			return fmt.Errorf("Failed deleting source volume after copy: %w", err)
 		}
 	}
 	progress.Done(finalMsg)
@@ -1526,7 +1524,7 @@ type cmdStorageVolumeMove struct {
 
 func (c *cmdStorageVolumeMove) Command() *cobra.Command {
 	cmd := &cobra.Command{}
-	cmd.Use = usage("move", i18n.G("<pool>/<volume> <pool>/<volume>"))
+	cmd.Use = usage("move", i18n.G("[<remote>:]<pool>/<volume> [<remote>:]<pool>/<volume>"))
 	cmd.Aliases = []string{"mv"}
 	cmd.Short = i18n.G("Move storage volumes between pools")
 	cmd.Long = cli.FormatSection(i18n.G("Description"), i18n.G(
@@ -2152,7 +2150,7 @@ func (c *cmdStorageVolumeExport) Run(cmd *cobra.Command, args []string) error {
 		// Delete backup after we're done
 		op, err = d.DeleteStoragePoolVolumeBackup(name, volName, backupName)
 		if err == nil {
-			op.Wait()
+			_ = op.Wait()
 		}
 	}()
 
@@ -2167,7 +2165,7 @@ func (c *cmdStorageVolumeExport) Run(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	defer target.Close()
+	defer func() { _ = target.Close() }()
 
 	// Prepare the download request
 	progress = utils.ProgressRenderer{
@@ -2182,9 +2180,9 @@ func (c *cmdStorageVolumeExport) Run(cmd *cobra.Command, args []string) error {
 	// Export tarball
 	_, err = d.GetStoragePoolVolumeBackupFile(name, volName, backupName, &backupFileRequest)
 	if err != nil {
-		os.Remove(targetName)
+		_ = os.Remove(targetName)
 		progress.Done("")
-		return fmt.Errorf("Fetch storage volume backup file: %w", err)
+		return fmt.Errorf("Failed to fetch storage volume backup file: %w", err)
 	}
 
 	progress.Done(i18n.G("Backup exported successfully!"))
@@ -2242,7 +2240,7 @@ func (c *cmdStorageVolumeImport) Run(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	fstat, err := file.Stat()
 	if err != nil {

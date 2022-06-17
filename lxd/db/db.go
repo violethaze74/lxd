@@ -7,7 +7,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -240,13 +239,13 @@ func OpenCluster(closingCtx context.Context, name string, store driver.NodeStore
 
 	cluster.PreparedStmts = stmts
 
-	cluster := &Cluster{
+	clusterDB := &Cluster{
 		db:         db,
 		stmts:      stmts,
 		closingCtx: closingCtx,
 	}
 
-	err = cluster.Transaction(context.TODO(), func(ctx context.Context, tx *ClusterTx) error {
+	err = clusterDB.Transaction(context.TODO(), func(ctx context.Context, tx *ClusterTx) error {
 		// Figure out the ID of this node.
 		nodes, err := tx.GetNodes()
 		if err != nil {
@@ -271,10 +270,10 @@ func OpenCluster(closingCtx context.Context, name string, store driver.NodeStore
 		}
 
 		// Set the local member ID
-		cluster.NodeID(nodeID)
+		clusterDB.NodeID(nodeID)
 
 		// Delete any operation tied to this member
-		err = tx.DeleteOperations(nodeID)
+		err = cluster.DeleteOperations(ctx, tx.tx, nodeID)
 		if err != nil {
 			return err
 		}
@@ -285,7 +284,7 @@ func OpenCluster(closingCtx context.Context, name string, store driver.NodeStore
 		return nil, err
 	}
 
-	return cluster, err
+	return clusterDB, err
 }
 
 // ErrSomeNodesAreBehind is returned by OpenCluster if some of the nodes in the
@@ -312,6 +311,7 @@ func ForLocalInspectionWithPreparedStmts(db *sql.DB) (*Cluster, error) {
 		return nil, fmt.Errorf("Prepare database statements: %w", err)
 	}
 
+	cluster.PreparedStmts = stmts
 	c.stmts = stmts
 
 	return c, nil
@@ -407,7 +407,7 @@ func (c *Cluster) NodeID(id int64) {
 // Close the database facade.
 func (c *Cluster) Close() error {
 	for _, stmt := range c.stmts {
-		stmt.Close()
+		_ = stmt.Close()
 	}
 	return c.db.Close()
 }
@@ -461,7 +461,7 @@ func DqliteLatestSegment() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("Unable to open directory %s with error %v", dir, err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	fileNames, err := file.Readdirnames(0)
 	if err != nil {
@@ -513,7 +513,7 @@ func doDbQueryScan(c *Cluster, q string, args []any, outargs []any) ([][]any, er
 			if err != nil {
 				return err
 			}
-			defer rows.Close()
+			defer func() { _ = rows.Close() }()
 
 			for rows.Next() {
 				ptrargs := make([]any, len(outargs))
@@ -596,27 +596,4 @@ func exec(c *Cluster, q string, args ...any) error {
 		})
 	})
 	return err
-}
-
-// urlsToResourceNames returns a list of resource names extracted from one or more URLs of the same resource type.
-// The resource type path prefix to match is provided by the matchPathPrefix argument.
-// TODO: Duplicated method from client/util.go. Remove with decoupling of URL generation from db package.
-func urlsToResourceNames(matchPathPrefix string, urls ...string) ([]string, error) {
-	resourceNames := make([]string, 0, len(urls))
-
-	for _, urlRaw := range urls {
-		u, err := url.Parse(urlRaw)
-		if err != nil {
-			return nil, fmt.Errorf("Failed parsing URL %q: %w", urlRaw, err)
-		}
-
-		fields := strings.Split(u.Path, fmt.Sprintf("%s/", matchPathPrefix))
-		if len(fields) != 2 {
-			return nil, fmt.Errorf("Unexpected URL path %q", u)
-		}
-
-		resourceNames = append(resourceNames, fields[len(fields)-1])
-	}
-
-	return resourceNames, nil
 }

@@ -13,14 +13,16 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dustinkirkland/golang-petname"
+	petname "github.com/dustinkirkland/golang-petname"
 	"github.com/gorilla/websocket"
 
 	"github.com/lxc/lxd/lxd/archive"
 	"github.com/lxc/lxd/lxd/backup"
 	"github.com/lxc/lxd/lxd/cluster"
+	clusterConfig "github.com/lxc/lxd/lxd/cluster/config"
 	"github.com/lxc/lxd/lxd/db"
 	dbCluster "github.com/lxc/lxd/lxd/db/cluster"
+	"github.com/lxc/lxd/lxd/db/operationtype"
 	deviceConfig "github.com/lxc/lxd/lxd/device/config"
 	"github.com/lxc/lxd/lxd/instance"
 	"github.com/lxc/lxd/lxd/instance/instancetype"
@@ -52,6 +54,14 @@ func createFromImage(d *Daemon, r *http.Request, projectName string, req *api.In
 		return response.BadRequest(err)
 	}
 
+	var profiles []api.Profile
+	if req.Profiles != nil {
+		profiles, err = d.State().DB.Cluster.GetProfiles(projectName, req.Profiles)
+		if err != nil {
+			return response.BadRequest(err)
+		}
+	}
+
 	run := func(op *operations.Operation) error {
 		args := db.InstanceArgs{
 			Project:     projectName,
@@ -61,7 +71,7 @@ func createFromImage(d *Daemon, r *http.Request, projectName string, req *api.In
 			Devices:     deviceConfig.NewDevices(req.Devices),
 			Ephemeral:   req.Ephemeral,
 			Name:        req.Name,
-			Profiles:    req.Profiles,
+			Profiles:    profiles,
 		}
 
 		err := instance.ValidName(args.Name, args.Snapshot)
@@ -90,7 +100,7 @@ func createFromImage(d *Daemon, r *http.Request, projectName string, req *api.In
 			if p.Config["images.auto_update_cached"] != "" {
 				autoUpdate = shared.IsTrue(p.Config["images.auto_update_cached"])
 			} else {
-				autoUpdate, err = cluster.ConfigGetBool(d.db.Cluster, "images.auto_update_cached")
+				autoUpdate, err = clusterConfig.GetBool(d.db.Cluster, "images.auto_update_cached")
 				if err != nil {
 					return err
 				}
@@ -129,7 +139,7 @@ func createFromImage(d *Daemon, r *http.Request, projectName string, req *api.In
 				return err
 			}
 		} else {
-			_, info, err = d.db.Cluster.GetImage(hash, db.ImageFilter{Project: &projectName})
+			_, info, err = d.db.Cluster.GetImage(hash, dbCluster.ImageFilter{Project: &projectName})
 			if err != nil {
 				return err
 			}
@@ -151,7 +161,7 @@ func createFromImage(d *Daemon, r *http.Request, projectName string, req *api.In
 		resources["containers"] = resources["instances"]
 	}
 
-	op, err := operations.OperationCreate(d.State(), projectName, operations.OperationClassTask, db.OperationInstanceCreate, resources, nil, run, nil, nil, r)
+	op, err := operations.OperationCreate(d.State(), projectName, operations.OperationClassTask, operationtype.InstanceCreate, resources, nil, run, nil, nil, r)
 	if err != nil {
 		return response.InternalError(err)
 	}
@@ -169,6 +179,14 @@ func createFromNone(d *Daemon, r *http.Request, projectName string, req *api.Ins
 		return response.BadRequest(err)
 	}
 
+	var profiles []api.Profile
+	if req.Profiles != nil {
+		profiles, err = d.State().DB.Cluster.GetProfiles(projectName, req.Profiles)
+		if err != nil {
+			return response.BadRequest(err)
+		}
+	}
+
 	args := db.InstanceArgs{
 		Project:     projectName,
 		Config:      req.Config,
@@ -177,7 +195,7 @@ func createFromNone(d *Daemon, r *http.Request, projectName string, req *api.Ins
 		Devices:     deviceConfig.NewDevices(req.Devices),
 		Ephemeral:   req.Ephemeral,
 		Name:        req.Name,
-		Profiles:    req.Profiles,
+		Profiles:    profiles,
 	}
 
 	if req.Architecture != "" {
@@ -200,7 +218,7 @@ func createFromNone(d *Daemon, r *http.Request, projectName string, req *api.Ins
 		resources["containers"] = resources["instances"]
 	}
 
-	op, err := operations.OperationCreate(d.State(), projectName, operations.OperationClassTask, db.OperationInstanceCreate, resources, nil, run, nil, nil, r)
+	op, err := operations.OperationCreate(d.State(), projectName, operations.OperationClassTask, operationtype.InstanceCreate, resources, nil, run, nil, nil, r)
 	if err != nil {
 		return response.InternalError(err)
 	}
@@ -249,20 +267,49 @@ func createFromMigration(d *Daemon, r *http.Request, projectName string, req *ap
 		Description:  req.Description,
 		Ephemeral:    req.Ephemeral,
 		Name:         req.Name,
-		Profiles:     req.Profiles,
+		Profiles:     make([]api.Profile, 0, len(req.Profiles)),
 		Stateful:     req.Stateful,
 	}
 
 	// Early profile validation.
-	profiles, err := d.db.Cluster.GetProfileNames(projectName)
+	err = d.db.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		profileProject := projectName
+		enabled, err := dbCluster.ProjectHasProfiles(context.Background(), tx.Tx(), profileProject)
+		if err != nil {
+			return fmt.Errorf("Check if project has profiles: %w", err)
+		}
+		if !enabled {
+			profileProject = "default"
+		}
+
+		profiles, err := dbCluster.GetProfiles(ctx, tx.Tx(), dbCluster.ProfileFilter{Project: &profileProject})
+		if err != nil {
+			return err
+		}
+
+		profilesByName := map[string]dbCluster.Profile{}
+		for _, profile := range profiles {
+			profilesByName[profile.Name] = profile
+		}
+
+		for _, name := range req.Profiles {
+			profile, ok := profilesByName[name]
+			if !ok {
+				return fmt.Errorf("Requested profile '%q' doesn't exist", name)
+			}
+
+			apiProfile, err := profile.ToAPI(ctx, tx.Tx())
+			if err != nil {
+				return err
+			}
+
+			args.Profiles = append(args.Profiles, *apiProfile)
+		}
+
+		return nil
+	})
 	if err != nil {
 		return response.InternalError(err)
-	}
-
-	for _, profile := range args.Profiles {
-		if !shared.StringInSlice(profile, profiles) {
-			return response.BadRequest(fmt.Errorf("Requested profile '%s' doesn't exist", profile))
-		}
 	}
 
 	storagePool, storagePoolProfile, localRootDiskDeviceKey, localRootDiskDevice, resp := instanceFindStoragePool(d, projectName, req)
@@ -302,15 +349,18 @@ func createFromMigration(d *Daemon, r *http.Request, projectName string, req *ap
 
 	var inst instance.Instance
 	var instOp *operationlock.InstanceOperation
+	var cleanup revert.Hook
 
 	// Early check for refresh.
 	if req.Source.Refresh {
 		// Check if the instance exists.
 		inst, err = instance.LoadByProjectAndName(d.State(), projectName, req.Name)
 		if err != nil {
-			req.Source.Refresh = false
-		} else if inst.IsRunning() {
-			return response.BadRequest(fmt.Errorf("Cannot refresh a running instance"))
+			if response.IsNotFoundError(err) {
+				req.Source.Refresh = false
+			} else {
+				return response.InternalError(err)
+			}
 		}
 	}
 
@@ -329,12 +379,19 @@ func createFromMigration(d *Daemon, r *http.Request, projectName string, req *ap
 		// Note: At this stage we do not yet know if snapshots are going to be received and so we cannot
 		// create their DB records. This will be done if needed in the migrationSink.Do() function called
 		// as part of the operation below.
-		inst, instOp, err = instance.CreateInternal(d.State(), args, true, revert)
+		inst, instOp, cleanup, err = instance.CreateInternal(d.State(), args, true)
 		if err != nil {
 			return response.InternalError(fmt.Errorf("Failed creating instance record: %w", err))
 		}
-		defer instOp.Done(err)
+		revert.Add(cleanup)
+	} else {
+		instOp, err = inst.LockExclusive()
+		if err != nil {
+			return response.SmartError(fmt.Errorf("Failed getting exclusive access to instance: %w", err))
+		}
 	}
+
+	defer instOp.Done(err)
 
 	var cert *x509.Certificate
 	if req.Source.Certificate != "" {
@@ -409,12 +466,12 @@ func createFromMigration(d *Daemon, r *http.Request, projectName string, req *ap
 
 	var op *operations.Operation
 	if push {
-		op, err = operations.OperationCreate(d.State(), projectName, operations.OperationClassWebsocket, db.OperationInstanceCreate, resources, sink.Metadata(), run, nil, sink.Connect, r)
+		op, err = operations.OperationCreate(d.State(), projectName, operations.OperationClassWebsocket, operationtype.InstanceCreate, resources, sink.Metadata(), run, nil, sink.Connect, r)
 		if err != nil {
 			return response.InternalError(err)
 		}
 	} else {
-		op, err = operations.OperationCreate(d.State(), projectName, operations.OperationClassTask, db.OperationInstanceCreate, resources, nil, run, nil, nil, r)
+		op, err = operations.OperationCreate(d.State(), projectName, operations.OperationClassTask, operationtype.InstanceCreate, resources, nil, run, nil, nil, r)
 		if err != nil {
 			return response.InternalError(err)
 		}
@@ -527,24 +584,18 @@ func createFromCopy(d *Daemon, r *http.Request, projectName string, req *api.Ins
 
 	// Profiles override
 	if req.Profiles == nil {
-		req.Profiles = source.Profiles()
+		profileNames := make([]string, 0, len(source.Profiles()))
+		for _, profile := range source.Profiles() {
+			profileNames = append(profileNames, profile.Name)
+		}
+
+		req.Profiles = profileNames
 	}
 
 	if req.Stateful {
 		sourceName, _, _ := shared.InstanceGetParentAndSnapshotName(source.Name())
 		if sourceName != req.Name {
 			return response.BadRequest(fmt.Errorf("Copying stateful instances requires that source %q and target %q name be identical", sourceName, req.Name))
-		}
-	}
-
-	// Early check for refresh
-	if req.Source.Refresh {
-		// Check if the container exists
-		c, err := instance.LoadByProjectAndName(d.State(), targetProject, req.Name)
-		if err != nil {
-			req.Source.Refresh = false
-		} else if c.IsRunning() {
-			return response.BadRequest(fmt.Errorf("Cannot refresh a running instance"))
 		}
 	}
 
@@ -562,6 +613,11 @@ func createFromCopy(d *Daemon, r *http.Request, projectName string, req *api.Ins
 		return response.BadRequest(fmt.Errorf("Instance type should not be specified or should match source type"))
 	}
 
+	apiProfiles, err := d.db.Cluster.GetProfiles(targetProject, req.Profiles)
+	if err != nil {
+		return response.BadRequest(fmt.Errorf("Failed to get profiles from database: %w", err))
+	}
+
 	args := db.InstanceArgs{
 		Project:      targetProject,
 		Architecture: source.Architecture(),
@@ -572,7 +628,7 @@ func createFromCopy(d *Daemon, r *http.Request, projectName string, req *api.Ins
 		Devices:      deviceConfig.NewDevices(req.Devices),
 		Ephemeral:    req.Ephemeral,
 		Name:         req.Name,
-		Profiles:     req.Profiles,
+		Profiles:     apiProfiles,
 		Stateful:     req.Stateful,
 	}
 
@@ -598,7 +654,7 @@ func createFromCopy(d *Daemon, r *http.Request, projectName string, req *api.Ins
 		resources["containers"] = resources["instances"]
 	}
 
-	op, err := operations.OperationCreate(d.State(), targetProject, operations.OperationClassTask, db.OperationInstanceCreate, resources, nil, run, nil, nil, r)
+	op, err := operations.OperationCreate(d.State(), targetProject, operations.OperationClassTask, operationtype.InstanceCreate, resources, nil, run, nil, nil, r)
 	if err != nil {
 		return response.InternalError(err)
 	}
@@ -615,8 +671,8 @@ func createFromBackup(d *Daemon, r *http.Request, projectName string, data io.Re
 	if err != nil {
 		return response.InternalError(err)
 	}
-	defer os.Remove(backupFile.Name())
-	revert.Add(func() { backupFile.Close() })
+	defer func() { _ = os.Remove(backupFile.Name()) }()
+	revert.Add(func() { _ = backupFile.Close() })
 
 	// Stream uploaded backup data into temporary file.
 	_, err = io.Copy(backupFile, data)
@@ -625,7 +681,11 @@ func createFromBackup(d *Daemon, r *http.Request, projectName string, data io.Re
 	}
 
 	// Detect squashfs compression and convert to tarball.
-	backupFile.Seek(0, 0)
+	_, err = backupFile.Seek(0, 0)
+	if err != nil {
+		return response.InternalError(err)
+	}
+
 	_, algo, decomArgs, err := shared.DetectCompressionFile(backupFile)
 	if err != nil {
 		return response.InternalError(err)
@@ -640,7 +700,7 @@ func createFromBackup(d *Daemon, r *http.Request, projectName string, data io.Re
 		if err != nil {
 			return response.InternalError(err)
 		}
-		defer os.Remove(tarFile.Name())
+		defer func() { _ = os.Remove(tarFile.Name()) }()
 
 		// Decompress to tarFile temporary file.
 		err = archive.ExtractWithFds(decomArgs[0], decomArgs[1:], nil, nil, d.State().OS, tarFile)
@@ -649,15 +709,19 @@ func createFromBackup(d *Daemon, r *http.Request, projectName string, data io.Re
 		}
 
 		// We don't need the original squashfs file anymore.
-		backupFile.Close()
-		os.Remove(backupFile.Name())
+		_ = backupFile.Close()
+		_ = os.Remove(backupFile.Name())
 
 		// Replace the backup file handle with the handle to the tar file.
 		backupFile = tarFile
 	}
 
 	// Parse the backup information.
-	backupFile.Seek(0, 0)
+	_, err = backupFile.Seek(0, 0)
+	if err != nil {
+		return response.InternalError(err)
+	}
+
 	logger.Debug("Reading backup file info")
 	bInfo, err := backup.GetInfo(backupFile, d.State().OS, backupFile.Name())
 	if err != nil {
@@ -716,7 +780,7 @@ func createFromBackup(d *Daemon, r *http.Request, projectName string, data io.Re
 	runRevert := revert.Clone()
 
 	run := func(op *operations.Operation) error {
-		defer backupFile.Close()
+		defer func() { _ = backupFile.Close() }()
 		defer runRevert.Fail()
 
 		pool, err := storagePools.LoadByName(d.State(), bInfo.Pool)
@@ -751,7 +815,7 @@ func createFromBackup(d *Daemon, r *http.Request, projectName string, data io.Re
 		}
 
 		// Clean up created instance if the post hook fails below.
-		runRevert.Add(func() { inst.Delete(true) })
+		runRevert.Add(func() { _ = inst.Delete(true) })
 
 		// Run the storage post hook to perform any final actions now that the instance has been created
 		// in the database (this normally includes unmounting volumes that were mounted).
@@ -770,7 +834,7 @@ func createFromBackup(d *Daemon, r *http.Request, projectName string, data io.Re
 	resources["instances"] = []string{bInfo.Name}
 	resources["containers"] = resources["instances"]
 
-	op, err := operations.OperationCreate(d.State(), bInfo.Project, operations.OperationClassTask, db.OperationBackupRestore, resources, nil, run, nil, nil, r)
+	op, err := operations.OperationCreate(d.State(), bInfo.Project, operations.OperationClassTask, operationtype.BackupRestore, resources, nil, run, nil, nil, r)
 	if err != nil {
 		return response.InternalError(err)
 	}
@@ -824,6 +888,8 @@ func createFromBackup(d *Daemon, r *http.Request, projectName string, data io.Re
 //   "500":
 //     $ref: "#/responses/InternalServerError"
 func instancesPost(d *Daemon, r *http.Request) response.Response {
+	s := d.State()
+
 	targetProjectName := projectParam(r)
 	logger.Debugf("Responding to instance create")
 
@@ -933,7 +999,7 @@ func instancesPost(d *Daemon, r *http.Request) response.Response {
 			}
 		}
 
-		architectures, err := instance.SuitableArchitectures(d.State(), targetProjectName, req)
+		architectures, err := instance.SuitableArchitectures(s, targetProjectName, req)
 		if err != nil {
 			return response.BadRequest(err)
 		}
@@ -943,12 +1009,7 @@ func instancesPost(d *Daemon, r *http.Request) response.Response {
 			if targetProject.Config["images.default_architecture"] != "" {
 				defaultArch = targetProject.Config["images.default_architecture"]
 			} else {
-				config, err := cluster.ConfigLoad(tx)
-				if err != nil {
-					return err
-				}
-
-				defaultArch = config.ImagesDefaultArchitecture()
+				defaultArch = s.GlobalConfig.ImagesDefaultArchitecture()
 			}
 
 			defaultArchID := -1
@@ -1039,7 +1100,7 @@ func instancesPost(d *Daemon, r *http.Request) response.Response {
 					req.Source.Project = targetProjectName
 				}
 
-				source, err := instance.LoadInstanceDatabaseObject(tx, req.Source.Project, req.Source.Source)
+				source, err := instance.LoadInstanceDatabaseObject(ctx, tx, req.Source.Project, req.Source.Source)
 				if err != nil {
 					return fmt.Errorf("Load source instance from database: %w", err)
 				}

@@ -57,7 +57,7 @@ func eventsSocket(d *Daemon, r *http.Request, w http.ResponseWriter) error {
 			_, err := d.db.GetProject(context.Background(), projectName)
 			if err != nil {
 				if response.IsNotFoundError(err) {
-					response.BadRequest(fmt.Errorf("Project %q not found", projectName)).Render(w)
+					_ = response.BadRequest(fmt.Errorf("Project %q not found", projectName)).Render(w)
 				}
 
 				return err
@@ -80,22 +80,22 @@ func eventsSocket(d *Daemon, r *http.Request, w http.ResponseWriter) error {
 	// Validate event types.
 	for _, entry := range types {
 		if !shared.StringInSlice(entry, eventTypes) {
-			response.BadRequest(fmt.Errorf("'%s' isn't a supported event type", entry)).Render(w)
+			_ = response.BadRequest(fmt.Errorf("'%s' isn't a supported event type", entry)).Render(w)
 			return nil
 		}
 	}
 
 	if shared.StringInSlice("logging", types) && !rbac.UserIsAdmin(r) {
-		response.Forbidden(nil).Render(w)
+		_ = response.Forbidden(nil).Render(w)
 		return nil
 	}
 
 	// Upgrade the connection to websocket
-	c, err := shared.WebsocketUpgrader.Upgrade(w, r, nil)
+	conn, err := shared.WebsocketUpgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return err
 	}
-	defer c.Close() // This ensures the go routine below is ended when this function ends.
+	defer func() { _ = conn.Close() }() // Ensure listener below ends when this function ends.
 
 	var excludeLocations []string
 	// Get the current local serverName and store it for the events.
@@ -146,7 +146,9 @@ func eventsSocket(d *Daemon, r *http.Request, w http.ResponseWriter) error {
 		}
 	}
 
-	listener, err := d.events.AddListener(projectName, allProjects, c, types, excludeSources, recvFunc, excludeLocations)
+	listenerConnection := events.NewWebsocketListenerConnection(conn)
+
+	listener, err := d.events.AddListener(projectName, allProjects, listenerConnection, types, excludeSources, recvFunc, excludeLocations)
 	if err != nil {
 		return err
 	}
@@ -176,6 +178,10 @@ func eventsSocket(d *Daemon, r *http.Request, w http.ResponseWriter) error {
 //     description: Event type(s), comma separated (valid types are logging, operation or lifecycle)
 //     type: string
 //     example: logging,lifecycle
+//   - in: query
+//     name: all-projects
+//     description: Retrieve instances from all projects
+//     type: boolean
 // responses:
 //   "200":
 //     description: Websocket message (JSON)

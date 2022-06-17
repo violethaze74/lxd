@@ -29,7 +29,8 @@ type ceph struct {
 func (d *ceph) load() error {
 	// Register the patches.
 	d.patches = map[string]func() error{
-		"storage_lvm_skipactivation": nil,
+		"storage_lvm_skipactivation":       nil,
+		"storage_missing_snapshot_records": nil,
 	}
 
 	// Done if previously loaded.
@@ -144,7 +145,7 @@ func (d *ceph) Create() error {
 			return err
 		}
 
-		revert.Add(func() { d.osdDeletePool() })
+		revert.Add(func() { _ = d.osdDeletePool() })
 
 		// Initialize the pool. This is not necessary but allows the pool to be monitored.
 		_, err = shared.TryRunCommand("rbd",
